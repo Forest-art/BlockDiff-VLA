@@ -3,7 +3,7 @@ defaults:
   - annotations: new_playtable_validation
   - datamodule: calvin
 
-model_config: /cephfs/cjyjk/UnifiedVLM-Manipulation/UP-VLA/policy_rollout/upvla_model.yaml
+model_config: # direct path to policy_rollout/upvla_model.yaml
 
 eval_cfg_overwrite:
   datamodule:

@@ -79,12 +79,11 @@ You can skip the pretraining stage or using MMU dataset cotraining for policy le
 ## Evaluation 📊
 
 ### 📊 Rollout on Calvin benchmark
-You should install Calvin as described in installation section. Remember to reset the `dataset_path, root_data_dir` in `policy_rollout/calvin_evaluate_upvla.yaml` with the origin calvin abcd dataset. Then, you need to modify `tuned_model_path` in `policy_rollout/upvla_model.yaml` to specify the checkpoint. You can directly use our provided checkpoint or your saved checkpoint using our training script.
+You should install Calvin as described in installation section. Remember to reset the `dataset_path, root_data_dir` in `policy_conf/calvin_evaluate_upvla.yaml` with the origin calvin abcd dataset, and set the `model_config` to direct path of `policy_rollout/upvla_model.py`. Then, you need to modify `tuned_model_path` in `policy_rollout/upvla_model.yaml` to specify the checkpoint, in which you can also change other settings of the model for rollout. You can directly use our provided checkpoint or your saved checkpoint using our training script. 
 
-Lastly, copy the scripts and config files (`calvin_evaluate_upvla.yaml` and `upvla_model.yaml`) to the CALVIN evaluation folder (installed with the official repo) and run: 
+Lastly, execute the following command:
 ```bash
-cd /path to your calvin folder
-python evaluation/calvin_evaluate_upvla.py
+python policy_evaluation/calvin_evaluate_upvla.py
 ```
 After running this command, you can find the predicted images in the folder of `tuned_model_path` which visualize both the current observations and future predictions.
 
