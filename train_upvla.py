@@ -35,7 +35,6 @@ from torch.optim import AdamW
 from lightning.pytorch.utilities import CombinedLoader
 
 from transformers import AutoTokenizer
-from training.data import TexpremageDataset
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedType, set_seed

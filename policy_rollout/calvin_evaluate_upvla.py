@@ -8,7 +8,7 @@ import time
 from PIL import Image
 import sys
 
-sys.path.insert(0, "./UP-VLA")
+sys.path.insert(0, "/cephfs/cjyjk/UnifiedVLM-Manipulation/UP-VLA")
 from models import Upvla, MAGVITv2, CLIPVisionTower
 from training.prompting_utils import UniversalPrompting_w_action, \
     create_attention_mask_predict_next_for_future_prediction
@@ -40,12 +40,10 @@ from tqdm.auto import tqdm
 import wandb
 import torch.distributed as dist
 
-# packages from origin calvin
-
-from evaluation.multistep_sequences import get_sequences
-from evaluation.utils import get_default_beso_and_env, get_env_state_for_initial_condition, join_vis_lang
-from models.utils.utils import get_last_checkpoint
-from models.rollout.rollout_video import RolloutVideo
+from policy_evaluation.multistep_sequences import get_sequences
+from policy_evaluation.utils import get_default_beso_and_env, get_env_state_for_initial_condition, join_vis_lang
+from policy_models.utils.utils import get_last_checkpoint
+from policy_models.rollout.rollout_video import RolloutVideo
 
 logger = logging.getLogger(__name__)
 
@@ -343,7 +341,7 @@ def rollout(env, model, task_oracle, cfg, subtask, lang_embeddings, val_annotati
     return False
 
 
-@hydra.main(config_path="./", config_name="calvin_evaluate_upvla")
+@hydra.main(config_path="../policy_conf", config_name="calvin_evaluate_upvla")
 def main(cfg):
     log_wandb = cfg.log_wandb
     torch.cuda.set_device(cfg.device)

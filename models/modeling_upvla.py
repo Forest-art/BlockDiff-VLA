@@ -76,6 +76,7 @@ class Upvla(ModelMixin, ConfigMixin):
         max_seq_length=128,
         labels_mask_text=None,
         labels_mask_image=None,
+        output_mode="action",
         **kwargs,
     ):
         if input_embeddings is None:
@@ -113,11 +114,16 @@ class Upvla(ModelMixin, ConfigMixin):
 
             return logits, loss_pre, loss_mmu, loss_act
         else:
-            tokens_vla = output['hidden_states'][-1]
-            tokens_vla = tokens_vla[:, -self.act_step:, :]
-            learned_tokens_vla = self.token_learner(tokens_vla)  # (b,hidden_size)
-            logits_vla = self.to_logits(learned_tokens_vla)
-            return logits_vla
+            if output_mode == "action":
+                tokens_vla = output['hidden_states'][-1]
+                tokens_vla = tokens_vla[:, -self.act_step:, :]
+                learned_tokens_vla = self.token_learner(tokens_vla)  # (b,hidden_size)
+                logits_vla = self.to_logits(learned_tokens_vla)
+                return logits_vla
+            elif output_mode == "mmu":
+                return output["logits"]
+            else:
+                raise ValueError(f"Invalid output_mode: {output_mode}")
 
     def pre_pad_predict(
         self,
@@ -256,7 +262,7 @@ class Upvla(ModelMixin, ConfigMixin):
 
         result = []
         for _ in range(max_new_tokens):
-            logits = self(idx, input_embeddings=input_embeddings, attention_mask=attention_mask)
+            logits = self(idx, input_embeddings=input_embeddings, attention_mask=attention_mask, output_mode="mmu")
             # print(logits)
             L = attention_mask.shape[-1]
             attention_mask = attention_mask.squeeze()
