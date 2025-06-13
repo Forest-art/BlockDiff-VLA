@@ -83,7 +83,7 @@ You should install Calvin as described in installation section. Remember to rese
 
 Lastly, execute the following command:
 ```bash
-python policy_evaluation/calvin_evaluate_upvla.py
+python policy_rollout/calvin_evaluate_upvla.py
 ```
 After running this command, you can find the predicted images in the folder of `tuned_model_path` which visualize both the current observations and future predictions.
 
