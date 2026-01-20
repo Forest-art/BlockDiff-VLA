@@ -166,7 +166,7 @@ def main():
     uni_prompting = UniversalPrompting_w_action(
         tokenizer,
         max_text_len=config.dataset.preprocessing.max_seq_length,
-        special_tokens=("<|soi|>", "<|eoi|>", "<|sov|>", "<|eov|>", "<|pre|>", "<|mmu|>", "<|t2v|>", "<|v2v|>",
+        special_tokens=("<|soi|>", "<|eoi|>", "<|sov|>", "<|eov|>", "<|t2i|>", "<|mmu|>", "<|t2v|>", "<|v2v|>",
                         "<|lvg|>"),
         ignore_id=-100,
         cond_dropout_prob=config.training.cond_dropout_prob,
