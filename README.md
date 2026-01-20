@@ -35,7 +35,7 @@ wandb login <your wandb keys>
 
 If you want to perform experiments in [Calvin](https://arxiv.org/pdf/2112.03227), you need also prepare with the calvin environment following the official repo of [Calvin](https://github.com/mees/calvin.git).
 
-Download [showlab/show-o-w-clip-vit-512x512](https://huggingface.co/showlab/show-o-w-clip-vit-512x512) and or other show-o backbone you want from the huggingface. UP-VLA is built on the backbone of `show-o-w-clip-vit-512x512` by default. Prepare the backbone checkpoints under the `./showlab` folder.
+Download [showlab/show-o-w-clip-vit-512x512](https://huggingface.co/showlab/show-o-w-clip-vit-512x512), [phi-1.5](https://huggingface.co/microsoft/phi-1_5) or other show-o backbone you want from the huggingface. UP-VLA is built on the backbone of `show-o-w-clip-vit-512x512` by default. Prepare the backbone checkpoints under the `./showlab` folder.
 
 ## Data Preparation
 ### Embodied Data
