@@ -24,13 +24,13 @@ import math
 import shutil
 import time
 from pathlib import Path
-from typing import List, Optional, Union, Tuple
+from typing import Union, Tuple
 
 import numpy as np
 from PIL import Image
 from omegaconf import OmegaConf
+import wandb
 import torch
-import torch.nn.functional as F
 from torch.optim import AdamW
 from lightning.pytorch.utilities import CombinedLoader
 
@@ -52,24 +52,12 @@ from torch.utils.data.distributed import DistributedSampler
 
 from training.utils import get_config, flatten_omega_conf, mask_or_random_replace_tokens_for_future_prediction, \
     AverageMeter, image_transform
-from training.block_diffusion_utils import (
-    build_block_diffusion_attention_mask,
-    build_native_block_diffusion_batch,
-    build_prefixed_block_diffusion_attention_mask,
-    block_diffusion_token_shift_loss,
-    quantize_actions_to_tokens,
-)
 from training.future_view_prediction_w_action_dataset import get_future_view_prediction_w_action_data_loader
 import warnings
 import tqdm
 from llava.llava import conversation as conversation_lib
 
 warnings.filterwarnings('ignore')
-try:
-    import wandb
-except Exception:
-    wandb = None
-
 try:
     import apex
 
@@ -80,135 +68,11 @@ except ImportError:
 logger = get_logger(__name__, log_level="INFO")
 
 
-def _get_active_tracker_name(accelerator: Accelerator) -> Optional[str]:
-    if len(accelerator.trackers) == 0:
-        return None
-    names = {t.name for t in accelerator.trackers}
-    if "wandb" in names:
-        return "wandb"
-    if "tensorboard" in names:
-        return "tensorboard"
-    return None
-
-
-def _log_images(
-    accelerator: Accelerator,
-    key: str,
-    pil_images: List[Image.Image],
-    step: int,
-    captions: Optional[List[str]] = None,
-):
-    if not accelerator.is_main_process or len(pil_images) == 0:
-        return
-
-    tracker_name = _get_active_tracker_name(accelerator)
-    if tracker_name == "wandb" and wandb is not None:
-        wandb_images = []
-        for idx, image in enumerate(pil_images):
-            caption = captions[idx] if captions is not None and idx < len(captions) else None
-            wandb_images.append(wandb.Image(image, caption=caption))
-        wandb.log({key: wandb_images}, step=step)
-        return
-
-    if tracker_name == "tensorboard":
-        tb_tracker = accelerator.get_tracker("tensorboard")
-        writer = getattr(tb_tracker, "writer", None)
-        if writer is None:
-            return
-        for idx, image in enumerate(pil_images):
-            image_np = np.asarray(image)
-            writer.add_image(f"{key}/{idx}", image_np, global_step=step, dataformats="HWC")
-            if captions is not None and idx < len(captions):
-                writer.add_text(f"{key}/{idx}_caption", captions[idx], global_step=step)
-
-
-def _log_scalars(accelerator: Accelerator, values: dict, step: int):
-    if not accelerator.is_main_process or len(values) == 0:
-        return
-    if len(accelerator.trackers) == 0:
-        return
-    accelerator.log(values, step=step)
-
-
 def get_vq_model_class(model_type):
     if model_type == "magvitv2":
         return MAGVITv2
     else:
         raise ValueError(f"model_type {model_type} not supported.")
-
-
-def build_text_mdm_batch(
-    clean_ids: torch.Tensor,
-    valid_mask: torch.Tensor,
-    mask_token_id: int,
-    min_mask_ratio: float = 0.15,
-    max_mask_ratio: float = 0.60,
-    ignore_id: int = -100,
-):
-    """
-    Build text masked-denoising inputs:
-      - input_ids: clean text with random valid tokens replaced by mask token
-      - labels: original tokens only on masked positions, ignore elsewhere
-    """
-    if clean_ids.ndim != 2 or valid_mask.ndim != 2:
-        raise ValueError("clean_ids and valid_mask must be [B, L].")
-    if clean_ids.shape != valid_mask.shape:
-        raise ValueError("clean_ids and valid_mask shape mismatch.")
-
-    bsz, _ = clean_ids.shape
-    min_mask_ratio = float(max(0.0, min_mask_ratio))
-    max_mask_ratio = float(min(1.0, max_mask_ratio))
-    if max_mask_ratio < min_mask_ratio:
-        max_mask_ratio = min_mask_ratio
-
-    ratios = torch.empty((bsz, 1), device=clean_ids.device).uniform_(min_mask_ratio, max_mask_ratio)
-    sampled = torch.rand(clean_ids.shape, device=clean_ids.device)
-    masked_pos = (sampled < ratios) & valid_mask
-
-    # Keep at least one masked token for each sample that has any valid token.
-    for b in range(bsz):
-        if bool(valid_mask[b].any()) and not bool(masked_pos[b].any()):
-            valid_idx = torch.nonzero(valid_mask[b], as_tuple=False).squeeze(-1)
-            pick = valid_idx[torch.randint(0, valid_idx.numel(), (1,), device=clean_ids.device)]
-            masked_pos[b, pick] = True
-
-    input_ids = clean_ids.clone()
-    input_ids[masked_pos] = int(mask_token_id)
-
-    labels = torch.full_like(clean_ids, int(ignore_id))
-    labels[masked_pos] = clean_ids[masked_pos]
-    return input_ids, labels
-
-
-def _parse_block_size_candidates(raw_value, default_block_size: int) -> List[int]:
-    if raw_value is None:
-        return [int(default_block_size)]
-    if isinstance(raw_value, (list, tuple)):
-        vals = [int(v) for v in raw_value]
-    else:
-        vals = [int(raw_value)]
-    vals = [v for v in vals if v > 0]
-    if len(vals) == 0:
-        return [int(default_block_size)]
-    return sorted(set(vals))
-
-
-def _sample_block_sizes_for_batch(
-    batch_size: int,
-    device: torch.device,
-    default_block_size: int,
-    elastic_enabled: bool,
-    candidates: List[int],
-) -> Optional[torch.Tensor]:
-    if batch_size <= 0:
-        return None
-    if not elastic_enabled:
-        return None
-    if len(candidates) == 0:
-        return torch.full((batch_size,), int(default_block_size), dtype=torch.long, device=device)
-    candidate_tensor = torch.tensor(candidates, dtype=torch.long, device=device)
-    idx = torch.randint(low=0, high=candidate_tensor.shape[0], size=(batch_size,), device=device)
-    return candidate_tensor[idx]
 
 
 def main():
@@ -224,20 +88,10 @@ def main():
         torch.backends.cudnn.deterministic = False
 
     config.experiment.logging_dir = str(Path(config.experiment.output_dir) / "logs")
-    tracker_backend = str(config.experiment.get("tracker", "tensorboard")).lower()
-    if tracker_backend not in {"tensorboard", "wandb", "none"}:
-        raise ValueError(
-            f"Unsupported experiment.tracker='{tracker_backend}', expected one of: tensorboard|wandb|none"
-        )
-    if tracker_backend == "wandb" and wandb is None:
-        logger.warning("wandb is not installed; falling back to tensorboard tracker.")
-        tracker_backend = "tensorboard"
-
-    log_with = None if tracker_backend == "none" else tracker_backend
     accelerator = Accelerator(
         gradient_accumulation_steps=config.training.gradient_accumulation_steps,
         mixed_precision=config.training.mixed_precision,
-        log_with=log_with,
+        log_with="wandb",
         project_dir=config.experiment.logging_dir,
         split_batches=True,
     )
@@ -267,35 +121,29 @@ def main():
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
-    if accelerator.is_main_process and tracker_backend != "none":
-        tracker_config = {k: v for k, v in flatten_omega_conf(config, resolve=True)}
-        tracker_config.pop("experiment.resume_from_checkpoint", None)
+    if accelerator.is_main_process:
+        resume_wandb_run = config.wandb.resume
+        run_id = config.wandb.get("run_id", None)
+        if run_id is None:
+            resume_wandb_run = False
+            run_id = wandb.util.generate_id()
+            config.wandb.run_id = run_id
 
-        if tracker_backend == "wandb":
-            resume_wandb_run = config.wandb.resume
-            run_id = config.wandb.get("run_id", None)
-            if run_id is None:
-                resume_wandb_run = False
-                run_id = wandb.util.generate_id()
-                config.wandb.run_id = run_id
+        wandb_init_kwargs = dict(
+            name=config.experiment.name,
+            id=run_id,
+            resume=resume_wandb_run,
+            entity=config.wandb.get("entity", None),
+            config_exclude_keys=[],
+        )
+        wandb_config = {k: v for k, v in flatten_omega_conf(config, resolve=True)}
+        wandb_config.pop("experiment.resume_from_checkpoint")
 
-            wandb_init_kwargs = dict(
-                name=config.experiment.name,
-                id=run_id,
-                resume=resume_wandb_run,
-                entity=config.wandb.get("entity", None),
-                config_exclude_keys=[],
-            )
-            accelerator.init_trackers(
-                config.experiment.project,
-                config=tracker_config,
-                init_kwargs={"wandb": wandb_init_kwargs},
-            )
-        else:
-            accelerator.init_trackers(
-                config.experiment.project,
-                config=tracker_config,
-            )
+        accelerator.init_trackers(
+            config.experiment.project,
+            config=wandb_config,
+            init_kwargs={"wandb": wandb_init_kwargs},
+        )
 
     if accelerator.is_main_process:
         os.makedirs(config.experiment.output_dir, exist_ok=True)
@@ -307,64 +155,12 @@ def main():
     if config.training.seed is not None:
         set_seed(config.training.seed)
 
-    framework = str(config.model.get("framework", "upvla")).lower()
-    is_bdvla = framework == "bdvla"
-    text_objective_defaults = {
-        "arvla": "ar",
-        "mdmvla": "mdm",
-        "bdvla": "bd",
-    }
-    text_objective = str(config.training.get("text_objective", text_objective_defaults.get(framework, "ar"))).lower()
-    if text_objective not in {"ar", "mdm", "bd"}:
-        raise ValueError(f"Unsupported training.text_objective='{text_objective}', expected one of: ar|mdm|bd")
-
-    bd_cfg = config.get("block_diffusion", OmegaConf.create({}))
-    bd_text_enabled = bool(bd_cfg.get("text_enabled", text_objective == "bd"))
-    bd_action_enabled = bool(bd_cfg.get("action_enabled", is_bdvla))
-    bd_block_size = int(bd_cfg.get("block_size", 32))
-    bd_mask_eps = float(bd_cfg.get("mask_eps", 1e-3))
-    bd_complementary_mask = bool(bd_cfg.get("complementary_mask", True))
-    bd_action_num_bins = int(bd_cfg.get("action_num_bins", 256))
-    bd_elastic_enabled = bool(bd_cfg.get("elastic_block_enabled", False))
-    bd_block_size_candidates = _parse_block_size_candidates(
-        bd_cfg.get("block_size_candidates", [bd_block_size]),
-        default_block_size=bd_block_size,
-    )
-    text_mdm_cfg = config.get("text_mdm", OmegaConf.create({}))
-    text_mdm_min_mask_ratio = float(text_mdm_cfg.get("min_mask_ratio", 0.15))
-    text_mdm_max_mask_ratio = float(text_mdm_cfg.get("max_mask_ratio", 0.60))
-    text_mdm_enabled = text_objective == "mdm"
-    text_denoise_enabled = bd_text_enabled or text_mdm_enabled
-    if bd_action_num_bins > int(config.model.showo.codebook_size):
-        raise ValueError("block_diffusion.action_num_bins must be <= model.showo.codebook_size")
-    if bd_elastic_enabled:
-        logger.info(
-            f"Elastic block diffusion enabled with candidates={bd_block_size_candidates} "
-            f"(default={bd_block_size})"
-        )
-
     #########################
     # MODELS and OPTIMIZER  #
     #########################
     logger.info("Loading models and optimizer")
 
-    tokenizer_kwargs = {"padding_side": "left"}
-    if bool(config.model.showo.get("trust_remote_code", False)):
-        tokenizer_kwargs["trust_remote_code"] = True
-    tokenizer = AutoTokenizer.from_pretrained(config.model.showo.llm_model_path, **tokenizer_kwargs)
-    tokenizer_base_vocab = int(len(tokenizer))
-    if bool(config.model.showo.get("auto_set_llm_vocab_size", False)):
-        config.model.showo.llm_vocab_size = tokenizer_base_vocab
-        config.model.showo.vocab_size = int(
-            tokenizer_base_vocab + int(config.model.showo.codebook_size) +
-            int(config.model.showo.num_new_special_tokens) + 1
-        )
-    elif int(config.model.showo.llm_vocab_size) != tokenizer_base_vocab:
-        logger.warning(
-            f"Configured llm_vocab_size={int(config.model.showo.llm_vocab_size)} but tokenizer has "
-            f"{tokenizer_base_vocab} tokens. Consider setting model.showo.auto_set_llm_vocab_size=true."
-        )
-    action_token_offset = int(config.model.showo.llm_vocab_size + config.model.showo.num_new_special_tokens)
+    tokenizer = AutoTokenizer.from_pretrained(config.model.showo.llm_model_path, padding_side="left")
 
     # unified prompting for show-o
     uni_prompting = UniversalPrompting_w_action(
@@ -394,8 +190,7 @@ def main():
     if config.model.showo.load_from_showo:
         model = Upvla.from_pretrained(
             config.model.showo.pretrained_model_path, low_cpu_mem_usage=False,
-            act_step=config.act_step,
-            framework=framework).to(accelerator.device)
+            act_step=config.act_step).to(accelerator.device)
         if config.model.showo.vocab_size != model.vocab_size:
             model.showo.resize_token_embeddings(config.model.showo.vocab_size)
             model.config.codebook_size = config.model.showo.codebook_size
@@ -405,7 +200,7 @@ def main():
             model.config.mask_token_id = model.config.vocab_size - 1
             model.mask_token_id = model.config.vocab_size - 1
     else:
-        model = Upvla(framework=framework, **config.model.showo).to(accelerator.device)
+        model = Upvla(**config.model.showo).to(accelerator.device)
     mask_id = model.mask_token_id
 
     # PRE-TRAIN: ONLY TRAIN MM PROJECTOR
@@ -664,17 +459,6 @@ def main():
                 image_tokens_ori,
                 target_image_tokens,
             ) = prepare_inputs_and_labels(pixel_values, texts, config.training.min_masking_rate)
-
-            pre_text_clean_ids = None
-            pre_text_valid_mask = None
-            if text_denoise_enabled:
-                text_prefix_len = int(config.dataset.preprocessing.max_seq_length) + 1
-                pad_id = int(uni_prompting.sptids_dict['<|pad|>'])
-                pre_text_clean_ids = input_ids[:, :text_prefix_len].clone()
-                pre_text_valid_mask = pre_text_clean_ids != pad_id
-                # keep task token (<|t2i|>) unmasked
-                pre_text_valid_mask[:, 0] = False
-
             attention_mask = create_attention_mask_predict_next_for_future_prediction(
                 input_ids,
                 pad_id=int(uni_prompting.sptids_dict['<|pad|>']),
@@ -683,39 +467,27 @@ def main():
                 rm_pad_in_image=True,
                 return_inverse_mask=True)
             attention_mask = attention_mask.to(mask_dtype)
-            mmu_text_clean_ids = None
-            mmu_text_valid_mask = None
             if config.dataset.und_type == "llava_tuning":
-                pixel_values_mmu, input_ids_mmu_raw, labels_mmu_raw, input_ids_system = (
-                    batch["mmu_flow"]["images"],
-                    batch["mmu_flow"]["input_ids"],
-                    batch["mmu_flow"]["labels"],
-                    batch["mmu_flow"]["input_ids_system"],
-                )
+                pixel_values_mmu, input_ids_mmu, labels_mmu, input_ids_system = (batch["mmu_flow"]["images"],
+                                                                                 batch["mmu_flow"]["input_ids"],
+                                                                                 batch["mmu_flow"]["labels"],
+                                                                                 batch["mmu_flow"]["input_ids_system"])
 
                 pixel_values_mmu = pixel_values_mmu.to(accelerator.device, non_blocking=True)
-                input_ids_mmu_raw = input_ids_mmu_raw.to(accelerator.device, non_blocking=True)
-                labels_mmu_raw = labels_mmu_raw.to(accelerator.device, non_blocking=True)
+                input_ids_mmu = input_ids_mmu.to(accelerator.device, non_blocking=True)
                 input_ids_system = input_ids_system.to(accelerator.device, non_blocking=True)
 
                 input_ids_mmu = torch.cat([
-                    (torch.ones(input_ids_mmu_raw.shape[0], 1) * uni_prompting.sptids_dict['<|mmu|>']).to(
+                    (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.sptids_dict['<|mmu|>']).to(
                         accelerator.device),
                     input_ids_system,
-                    (torch.ones(input_ids_mmu_raw.shape[0], 1) * uni_prompting.sptids_dict['<|soi|>']).to(
+                    (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.sptids_dict['<|soi|>']).to(
                         accelerator.device),
-                    (torch.ones(input_ids_mmu_raw.shape[0], 1) * uni_prompting.sptids_dict['<|eoi|>']).to(
+                    (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.sptids_dict['<|eoi|>']).to(
                         accelerator.device),
-                    input_ids_mmu_raw,
+                    input_ids_mmu,
                 ],
                                           dim=1).long()
-                mmu_text_clean_ids = None
-                mmu_text_valid_mask = None
-                if text_denoise_enabled:
-                    mmu_text_clean_ids = input_ids_mmu.clone()
-                    mmu_prefix_len = 1 + input_ids_system.shape[1] + 2  # <|mmu|> + system + <|soi|><|eoi|>
-                    mmu_text_valid_mask = torch.zeros_like(input_ids_mmu, dtype=torch.bool)
-                    mmu_text_valid_mask[:, mmu_prefix_len:] = labels_mmu_raw != uni_prompting.ignore_id
 
                 images_feat = vision_tower(pixel_values_mmu).to(images_feat_dtype)
                 if hasattr(model, 'module'):
@@ -724,9 +496,8 @@ def main():
                 else:
                     images_embeddings = model.mm_projector(images_feat)
                     text_embeddings = model.showo.model.embed_tokens(input_ids_mmu)
-                split_idx = 1 + input_ids_system.shape[1] + 1  # <|mmu|> + system + <|soi|>
-                part1 = text_embeddings[:, :split_idx, :]
-                part2 = text_embeddings[:, split_idx:, :]
+                part1 = text_embeddings[:, :2 + SYSTEM_PROMPT_LEN, :]
+                part2 = text_embeddings[:, 2 + SYSTEM_PROMPT_LEN:, :]
 
                 input_embeddings = torch.cat((part1, images_embeddings, part2), dim=1)
 
@@ -737,7 +508,7 @@ def main():
                         (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.ignore_id).to(accelerator.device),  # soi
                         torch.ones_like(images_embeddings[:, :, 0]) * uni_prompting.ignore_id,  # ignore image embedding
                         (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.ignore_id).to(accelerator.device),  # eoi
-                        labels_mmu_raw.to(accelerator.device)
+                        labels_mmu.to(accelerator.device)
                     ],
                     dim=1).long()
 
@@ -755,92 +526,6 @@ def main():
             input_embeddings = torch.cat([text_embeddings_img_text, input_embeddings], dim=0)
 
             labels = torch.cat((labels, labels_mmu.to(input_ids.device)), dim=0)
-            text_bd_pre_batch = None
-            text_bd_mmu_batch = None
-            text_mdm_pre_batch = None
-            text_mdm_mmu_batch = None
-            if bd_text_enabled and pre_text_clean_ids is not None and pre_text_valid_mask is not None:
-                text_pre_block_sizes = _sample_block_sizes_for_batch(
-                    batch_size=pre_text_clean_ids.shape[0],
-                    device=pre_text_clean_ids.device,
-                    default_block_size=bd_block_size,
-                    elastic_enabled=bd_elastic_enabled,
-                    candidates=bd_block_size_candidates,
-                )
-                text_bd_pre_batch = build_native_block_diffusion_batch(
-                    clean_ids=pre_text_clean_ids,
-                    valid_mask=pre_text_valid_mask,
-                    mask_token_id=mask_id,
-                    block_size=bd_block_size,
-                    block_sizes=text_pre_block_sizes,
-                    eps=bd_mask_eps,
-                    ignore_id=-100,
-                    complementary_mask=bd_complementary_mask,
-                )
-            if bd_text_enabled and mmu_text_clean_ids is not None and mmu_text_valid_mask is not None:
-                text_mmu_block_sizes = _sample_block_sizes_for_batch(
-                    batch_size=mmu_text_clean_ids.shape[0],
-                    device=mmu_text_clean_ids.device,
-                    default_block_size=bd_block_size,
-                    elastic_enabled=bd_elastic_enabled,
-                    candidates=bd_block_size_candidates,
-                )
-                text_bd_mmu_batch = build_native_block_diffusion_batch(
-                    clean_ids=mmu_text_clean_ids,
-                    valid_mask=mmu_text_valid_mask,
-                    mask_token_id=mask_id,
-                    block_size=bd_block_size,
-                    block_sizes=text_mmu_block_sizes,
-                    eps=bd_mask_eps,
-                    ignore_id=-100,
-                    complementary_mask=bd_complementary_mask,
-                )
-            if text_mdm_enabled and pre_text_clean_ids is not None and pre_text_valid_mask is not None:
-                text_mdm_pre_batch = build_text_mdm_batch(
-                    clean_ids=pre_text_clean_ids,
-                    valid_mask=pre_text_valid_mask,
-                    mask_token_id=mask_id,
-                    min_mask_ratio=text_mdm_min_mask_ratio,
-                    max_mask_ratio=text_mdm_max_mask_ratio,
-                    ignore_id=-100,
-                )
-            if text_mdm_enabled and mmu_text_clean_ids is not None and mmu_text_valid_mask is not None:
-                text_mdm_mmu_batch = build_text_mdm_batch(
-                    clean_ids=mmu_text_clean_ids,
-                    valid_mask=mmu_text_valid_mask,
-                    mask_token_id=mask_id,
-                    min_mask_ratio=text_mdm_min_mask_ratio,
-                    max_mask_ratio=text_mdm_max_mask_ratio,
-                    ignore_id=-100,
-                )
-
-            action_bd_batch = None
-            action_bd_prefix = None
-            if bd_action_enabled:
-                action_tokens = quantize_actions_to_tokens(
-                    actions=actions.float(),
-                    num_bins=bd_action_num_bins,
-                    token_offset=action_token_offset,
-                ).reshape(actions.shape[0], -1)
-                action_valid_mask = torch.ones_like(action_tokens, dtype=torch.bool)
-                action_block_sizes = _sample_block_sizes_for_batch(
-                    batch_size=action_tokens.shape[0],
-                    device=action_tokens.device,
-                    default_block_size=bd_block_size,
-                    elastic_enabled=bd_elastic_enabled,
-                    candidates=bd_block_size_candidates,
-                )
-                action_bd_batch = build_native_block_diffusion_batch(
-                    clean_ids=action_tokens,
-                    valid_mask=action_valid_mask,
-                    mask_token_id=mask_id,
-                    block_size=bd_block_size,
-                    block_sizes=action_block_sizes,
-                    eps=bd_mask_eps,
-                    ignore_id=-100,
-                    complementary_mask=bd_complementary_mask,
-                )
-                action_bd_prefix = input_ids if action_bd_batch.repeats == 1 else torch.cat([input_ids, input_ids], dim=0)
 
             if global_step == 0 and epoch == 0:
                 logger.info("Input ids: {}".format(input_ids))
@@ -858,136 +543,16 @@ def main():
                     max_seq_length=config.dataset.preprocessing.max_seq_length,
                     actions=actions,
                     clip_pad_tokens=config.training.clip_pad_tokens)
-                if bd_text_enabled:
-                    text_bd_terms = []
-                    if text_bd_pre_batch is not None:
-                        text_pre_mask = build_block_diffusion_attention_mask(
-                            seq_len=text_bd_pre_batch.seq_len,
-                            block_size=text_bd_pre_batch.block_sizes,
-                            batch_size=text_bd_pre_batch.input_ids.shape[0],
-                            dtype=mask_dtype,
-                            device=text_bd_pre_batch.input_ids.device,
-                        )
-                        logits_text_pre = model(input_ids=text_bd_pre_batch.input_ids, attention_mask=text_pre_mask)
-                        text_bd_terms.append(
-                            block_diffusion_token_shift_loss(
-                                logits=logits_text_pre,
-                                labels_first_half=text_bd_pre_batch.labels,
-                                first_half_len=text_bd_pre_batch.seq_len,
-                                ignore_id=-100,
-                            ))
-                    if text_bd_mmu_batch is not None:
-                        text_mmu_mask = build_block_diffusion_attention_mask(
-                            seq_len=text_bd_mmu_batch.seq_len,
-                            block_size=text_bd_mmu_batch.block_sizes,
-                            batch_size=text_bd_mmu_batch.input_ids.shape[0],
-                            dtype=mask_dtype,
-                            device=text_bd_mmu_batch.input_ids.device,
-                        )
-                        logits_text_mmu = model(input_ids=text_bd_mmu_batch.input_ids, attention_mask=text_mmu_mask)
-                        text_bd_terms.append(
-                            block_diffusion_token_shift_loss(
-                                logits=logits_text_mmu,
-                                labels_first_half=text_bd_mmu_batch.labels,
-                                first_half_len=text_bd_mmu_batch.seq_len,
-                                ignore_id=-100,
-                            ))
-                    if len(text_bd_terms) > 0:
-                        loss_text_bd = torch.stack(text_bd_terms).mean()
-                    else:
-                        loss_text_bd = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-                else:
-                    loss_text_bd = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-
-                if text_mdm_enabled:
-                    text_mdm_terms = []
-                    if text_mdm_pre_batch is not None:
-                        text_pre_ids, text_pre_labels = text_mdm_pre_batch
-                        text_pre_mask = torch.zeros(
-                            (text_pre_ids.shape[0], 1, text_pre_ids.shape[1], text_pre_ids.shape[1]),
-                            dtype=mask_dtype,
-                            device=text_pre_ids.device,
-                        )
-                        logits_text_pre_mdm = model(input_ids=text_pre_ids, attention_mask=text_pre_mask)
-                        text_mdm_terms.append(
-                            block_diffusion_token_shift_loss(
-                                logits=logits_text_pre_mdm,
-                                labels_first_half=text_pre_labels,
-                                first_half_len=text_pre_ids.shape[1],
-                                ignore_id=-100,
-                            ))
-                    if text_mdm_mmu_batch is not None:
-                        text_mmu_ids, text_mmu_labels = text_mdm_mmu_batch
-                        text_mmu_mask = torch.zeros(
-                            (text_mmu_ids.shape[0], 1, text_mmu_ids.shape[1], text_mmu_ids.shape[1]),
-                            dtype=mask_dtype,
-                            device=text_mmu_ids.device,
-                        )
-                        logits_text_mmu_mdm = model(input_ids=text_mmu_ids, attention_mask=text_mmu_mask)
-                        text_mdm_terms.append(
-                            block_diffusion_token_shift_loss(
-                                logits=logits_text_mmu_mdm,
-                                labels_first_half=text_mmu_labels,
-                                first_half_len=text_mmu_ids.shape[1],
-                                ignore_id=-100,
-                            ))
-                    if len(text_mdm_terms) > 0:
-                        loss_text_mdm = torch.stack(text_mdm_terms).mean()
-                    else:
-                        loss_text_mdm = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-                else:
-                    loss_text_mdm = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
-
-                if text_objective == "ar":
-                    loss_text_obj = loss_mmu
-                elif text_objective == "mdm":
-                    loss_text_obj = loss_text_mdm
-                else:  # text_objective == "bd"
-                    loss_text_obj = loss_text_bd
-
-                if bd_action_enabled and action_bd_batch is not None and action_bd_prefix is not None:
-                    action_bd_inputs = torch.cat([action_bd_prefix, action_bd_batch.input_ids], dim=1)
-                    prefix_len = action_bd_prefix.shape[1]
-                    action_bd_mask = build_prefixed_block_diffusion_attention_mask(
-                        prefix_len=prefix_len,
-                        seq_len=action_bd_batch.seq_len,
-                        block_size=action_bd_batch.block_sizes,
-                        batch_size=action_bd_inputs.shape[0],
-                        dtype=mask_dtype,
-                        device=action_bd_inputs.device,
-                    )
-                    logits_action_bd = model(input_ids=action_bd_inputs, attention_mask=action_bd_mask)
-                    action_labels_half = torch.full(
-                        (action_bd_inputs.shape[0], prefix_len + action_bd_batch.seq_len),
-                        -100,
-                        dtype=action_bd_batch.labels.dtype,
-                        device=action_bd_inputs.device,
-                    )
-                    action_labels_half[:, prefix_len:] = action_bd_batch.labels
-                    loss_action_bd = block_diffusion_token_shift_loss(
-                        logits=logits_action_bd,
-                        labels_first_half=action_labels_half,
-                        first_half_len=prefix_len + action_bd_batch.seq_len,
-                        ignore_id=-100,
-                    )
-                else:
-                    loss_action_bd = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
                 # loss_act: action loss, loss_pre: image prediction loss, loss_mmu: original mmu lm loss
                 avg_loss_pre = accelerator.gather(loss_pre.repeat(config.training.batch_size_pre)).mean()
                 avg_loss_act = accelerator.gather(loss_act.repeat(config.training.batch_size_pre)).mean()
                 # avg_loss_mmu = accelerator.gather(loss_mmu.repeat(config.training.batch_size_mmu)).mean()
                 avg_loss_mmu = accelerator.gather(loss_mmu.repeat(config.training.batch_size_mmu)).mean()
-                avg_loss_text_bd = accelerator.gather(loss_text_bd.repeat(config.training.batch_size_pre)).mean()
-                avg_loss_text_mdm = accelerator.gather(loss_text_mdm.repeat(config.training.batch_size_pre)).mean()
-                avg_loss_text_obj = accelerator.gather(loss_text_obj.repeat(config.training.batch_size_pre)).mean()
-                avg_loss_action_bd = accelerator.gather(loss_action_bd.repeat(config.training.batch_size_pre)).mean()
 
                 # loss = config.training.pre_coeff * loss_pre + config.training.mmu_coeff * loss_mmu
                 loss = config.training.pre_coeff * loss_pre + \
                        config.training.act_coeff * loss_act + \
-                       config.training.mmu_coeff * loss_mmu + \
-                       config.training.get("text_coeff", 0.0) * loss_text_obj + \
-                       config.training.get("action_bd_coeff", 0.0) * loss_action_bd
+                       config.training.mmu_coeff * loss_mmu
                 # avg_masking_rate = accelerator.gather(mask_prob.repeat(config.training.batch_size_pre)).mean()
 
                 accelerator.backward(loss)
@@ -1022,7 +587,6 @@ def main():
                     )
 
                     visualize_predictions(
-                        accelerator=accelerator,
                         model=model,
                         vq_model=vq_model,
                         uni_prompting=uni_prompting,
@@ -1077,10 +641,6 @@ def main():
                         "step_loss_pre": avg_loss_pre.item(),
                         "step_loss_mmu": avg_loss_mmu.item(),
                         "step_loss_act": avg_loss_act.item(),
-                        "step_loss_text_bd": avg_loss_text_bd.item(),
-                        "step_loss_text_mdm": avg_loss_text_mdm.item(),
-                        "step_loss_text_obj": avg_loss_text_obj.item(),
-                        "step_loss_action_bd": avg_loss_action_bd.item(),
                         "lr": lr_scheduler.get_last_lr()[0],
                         # "avg_masking_rate": avg_masking_rate.item(),
                         "samples/sec/gpu": samples_per_second_per_gpu,
@@ -1093,10 +653,6 @@ def main():
                                 f"Loss_pre: {avg_loss_pre.item():0.4f} "
                                 f"Loss_mmu: {avg_loss_mmu.item():0.4f} "
                                 f"Loss_act: {avg_loss_act.item():0.4f} "
-                                f"Loss_text_bd: {avg_loss_text_bd.item():0.4f} "
-                                f"Loss_text_mdm: {avg_loss_text_mdm.item():0.4f} "
-                                f"Loss_text_obj({text_objective}): {avg_loss_text_obj.item():0.4f} "
-                                f"Loss_action_bd: {avg_loss_action_bd.item():0.4f} "
                                 f"Data (t): {data_time_m.val:0.4f}, {samples_per_second_per_gpu:0.2f}/s/gpu "
                                 f"Batch (t): {batch_time_m.val:0.4f} "
                                 f"LR: {lr_scheduler.get_last_lr()[0]:0.6f}")
@@ -1124,7 +680,6 @@ def main():
                     )
 
                     visualize_predictions(
-                        accelerator=accelerator,
                         model=model,
                         vq_model=vq_model,
                         uni_prompting=uni_prompting,
@@ -1183,7 +738,6 @@ def main():
 
 @torch.no_grad()
 def visualize_predictions(
-    accelerator,
     model,
     vq_model,
     uni_prompting,
@@ -1247,20 +801,17 @@ def visualize_predictions(
         predicted_images_ = np.concatenate((images, groundtruth_images, recons_images, predicted_images_), 2)
         pil_images = [Image.fromarray(image) for image in predicted_images_]
 
-        image_captions = [
-            f"mask ratio: {r:0.2f} (should be 0.0)\ncaption: {texts[j]}"
-            for j, r in enumerate(mask_ratio)
+        # Log images
+        wandb_images = [
+            wandb.Image(image, caption=f'mask ratio: {r:0.2f} (should be 0.0) \n caption: {texts[i]}')
+            for i, (image, r) in enumerate(zip(pil_images, mask_ratio))
         ]
-        _log_images(
-            accelerator=accelerator,
-            key=(
-                f"(view {i + 1}/{config.model.vla.num_view}): "
-                "Input original images v.s. Future images v.s Ground truth (Recon) v.s. Predicted images"
-            ),
-            pil_images=pil_images,
-            captions=image_captions,
-            step=global_step,
-        )
+        wandb.log(
+            {
+                f"(view {i + 1}/{config.model.vla.num_view}): Input original images v.s. Future images v.s Ground truth (Recon) v.s. Predicted images":
+                    wandb_images
+            },
+            step=global_step)
 
     model.train()
 
@@ -1385,13 +936,14 @@ def generate_images(
         recons_images = recons_images.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
         target_images = np.concatenate([recons_images, gen_images], axis=2)
         pil_images = [Image.fromarray(image) for image in target_images]
-        _log_images(
-            accelerator=accelerator,
-            key=f"(view {i + 1}/{config.model.vla.num_view}): Generated images (left input recon/right predict future)",
-            pil_images=pil_images,
-            captions=validation_prompts,
-            step=global_step,
-        )
+        # Log images
+        wandb_images = [wandb.Image(image, caption=validation_prompts[j]) for j, image in enumerate(pil_images)]
+        wandb.log(
+            {
+                f"(view {i + 1}/{config.model.vla.num_view}): Generated images (left input recon/right predict future)":
+                    wandb_images
+            },
+            step=global_step)
     model.train()
 
 
@@ -1567,13 +1119,8 @@ def mmu_generate(
     images = images.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
     pil_images = [Image.fromarray(image) for image in images]
 
-    _log_images(
-        accelerator=accelerator,
-        key="multimodal understanding",
-        pil_images=pil_images,
-        captions=responses,
-        step=global_step,
-    )
+    wandb_images = [wandb.Image(image, caption=responses[i]) for i, image in enumerate(pil_images)]
+    wandb.log({"multimodal understanding": wandb_images}, step=global_step)
 
     model.train()
 
@@ -1715,14 +1262,8 @@ def evaluate_validation(
         counter += 1
         if counter >= max_step:
             break
-    _log_scalars(
-        accelerator=accelerator,
-        values={
-            "validation_loss_pre": loss_meter_pre.avg,
-            "validation_loss_act": loss_meter_act.avg,
-        },
-        step=global_step,
-    )
+    wandb.log({"validation_loss_pre": loss_meter_pre.avg}, step=global_step)
+    wandb.log({"validation_loss_act": loss_meter_act.avg}, step=global_step)
     logger.info(f"validation_loss_act: {loss_meter_act.avg:0.4f}"
                 f"validation_loss_pre: {loss_meter_pre.avg:0.4f}")
     model.train()

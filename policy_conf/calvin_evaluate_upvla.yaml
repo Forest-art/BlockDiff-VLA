@@ -1,10 +1,9 @@
 defaults:
-  - _self_
   - /callbacks/rollout/tasks@tasks: new_playtable_tasks
   - annotations: new_playtable_validation
   - datamodule: calvin
 
-model_config: ${hydra:runtime.cwd}/policy_rollout/arvla_model.yaml
+model_config: # direct path to policy_rollout/upvla_model.yaml
 
 eval_cfg_overwrite:
   datamodule:
@@ -19,11 +18,11 @@ num_sequences: 1000
 num_videos: 10
 lang_embeddings: null
 render: False
-log_wandb: False
+log_wandb: True
 wandb:
   entity: omeryagmurlu
 debug: False
-dataset_path: ${oc.env:CALVIN_DATASET_PATH,""} # path to calvin task_ABC_D root
+dataset_path: /localssd/zjk_data/calvin/task_ABC_D # path to calvin
 model_name: mdt_test
 device: 0
 sampler_type: ddim
@@ -55,7 +54,7 @@ window_sampling_strategy: 'geometric'
 num_workers: 12
 img_gen_frame_diff: 3
 benchmark_name: calvin_abcd # calvin_abcd
-root_data_dir: ${dataset_path}
+root_data_dir: /localssd/zjk_data/calvin/task_ABC_D # path to calvin
 # sigma_min: null
 # sigma_max: null
 # noise_scheduler: null

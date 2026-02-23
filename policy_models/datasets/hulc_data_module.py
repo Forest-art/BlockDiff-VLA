@@ -1,7 +1,6 @@
 import logging
 import os
 from pathlib import Path
-import sys
 from typing import Dict, List
 
 import hydra
@@ -64,21 +63,14 @@ class HulcDataModule(pl.LightningDataModule):
 
         # download and unpack images
         if not dataset_exist:
-            print(f"No dataset found in {self.training_dir}.")
-            print("For information how to download full CALVIN dataset, please visit")
-            print("https://github.com/mees/calvin/tree/main/dataset")
-
-            auto_download = os.environ.get("CALVIN_AUTO_DOWNLOAD", "").lower() in {"1", "true", "yes"}
-            if "CI" not in os.environ and not auto_download:
-                if not sys.stdin.isatty():
-                    raise FileNotFoundError(
-                        "CALVIN dataset not found and stdin is non-interactive. "
-                        "Set CALVIN_AUTO_DOWNLOAD=1 to auto-download debug data or configure dataset_path correctly."
-                    )
-                print("Do you wish to download small debug dataset to continue?")
+            if "CI" not in os.environ:
+                print(f"No dataset found in {self.training_dir}.")
+                print("For information how to download to full CALVIN dataset, please visit")
+                print("https://github.com/mees/calvin/tree/main/dataset")
+                print("Do you wish to download small debug dataset to continue training?")
                 s = input("YES / no")
                 if s == "no":
-                    raise FileNotFoundError("User declined debug dataset download.")
+                    exit()
             logger.info(f"downloading dataset to {self.training_dir} and {self.val_dir}")
             torchvision.datasets.utils.download_and_extract_archive(ONE_EP_DATASET_URL, self.training_dir)
             torchvision.datasets.utils.download_and_extract_archive(ONE_EP_DATASET_URL, self.val_dir)
@@ -165,3 +157,4 @@ class HulcDataModule(pl.LightningDataModule):
             )
             for key, dataset in self.val_datasets.items()
         }
+

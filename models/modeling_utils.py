@@ -79,14 +79,6 @@ if is_accelerate_available():
     import accelerate
 
 
-def _load_state_dict_compat(model_file, variant=None):
-    """Support both old and new diffusers load_state_dict signatures."""
-    try:
-        return load_state_dict(model_file, variant=variant)
-    except TypeError:
-        return load_state_dict(model_file)
-
-
 def get_parameter_device(parameter: torch.nn.Module) -> torch.device:
     try:
         parameters_and_buffers = itertools.chain(parameter.parameters(), parameter.buffers())
@@ -744,7 +736,7 @@ class ModelMixin(torch.nn.Module, PushToHubMixin):
                 # if device_map is None, load the state dict and move the params from meta device to the cpu
                 if device_map is None and not is_sharded:
                     param_device = "cpu"
-                    state_dict = _load_state_dict_compat(model_file, variant=variant)
+                    state_dict = load_state_dict(model_file, variant=variant)
                     model._convert_deprecated_attention_blocks(state_dict)
                     # move the params from meta device to cpu
                     missing_keys = set(model.state_dict().keys()) - set(state_dict.keys())
@@ -756,19 +748,12 @@ class ModelMixin(torch.nn.Module, PushToHubMixin):
                             " those weights or else make sure your checkpoint file is correct."
                         )
 
-                    meta_kwargs = {
-                        "dtype": torch_dtype,
-                        "model_name_or_path": pretrained_model_name_or_path,
-                    }
-                    meta_sig = inspect.signature(load_model_dict_into_meta)
-                    if "device" in meta_sig.parameters:
-                        meta_kwargs["device"] = param_device
-                    elif "device_map" in meta_sig.parameters:
-                        meta_kwargs["device_map"] = {"": param_device}
                     unexpected_keys = load_model_dict_into_meta(
                         model,
                         state_dict,
-                        **meta_kwargs,
+                        device=param_device,
+                        dtype=torch_dtype,
+                        model_name_or_path=pretrained_model_name_or_path,
                     )
 
                     if cls._keys_to_ignore_on_load_unexpected is not None:
@@ -776,7 +761,6 @@ class ModelMixin(torch.nn.Module, PushToHubMixin):
                             unexpected_keys = [k for k in unexpected_keys if re.search(pat, k) is None]
 
                     if len(unexpected_keys) > 0:
-                        unexpected_keys = [str(k) for k in unexpected_keys if k is not None]
                         logger.warning(
                             f"Some weights of the model checkpoint were not used when initializing {cls.__name__}: \n {[', '.join(unexpected_keys)]}"
                         )
@@ -845,7 +829,7 @@ class ModelMixin(torch.nn.Module, PushToHubMixin):
             else:
                 model = cls.from_config(config, **unused_kwargs)
 
-                state_dict = _load_state_dict_compat(model_file, variant=variant)
+                state_dict = load_state_dict(model_file, variant=variant)
                 model._convert_deprecated_attention_blocks(state_dict)
 
                 model, missing_keys, unexpected_keys, mismatched_keys, error_msgs = cls._load_pretrained_model(

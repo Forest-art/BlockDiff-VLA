@@ -16,11 +16,7 @@ import sys
 import torch
 from PIL import Image
 
-# Make local imports stable no matter where the script is launched from.
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
+sys.path.insert(0, "./UP-VLA")
 from models import Upvla, MAGVITv2, CLIPVisionTower
 from training.prompting_utils import UniversalPrompting_w_action, \
     create_attention_mask_predict_next_for_future_prediction
@@ -122,11 +118,7 @@ def get_upvla_agent(model_config, cfg):
     vq_model.eval()
 
     model = Upvla.from_pretrained(
-        config.model.showo.pretrained_model_path,
-        low_cpu_mem_usage=False,
-        act_step=config.act_step,
-        framework=str(config.model.get("framework", "upvla")),
-    ).to(device)
+        config.model.showo.pretrained_model_path, low_cpu_mem_usage=False, act_step=config.act_step).to(device)
     assert config.model.showo.vocab_size == model.vocab_size
     # load from tuned ckpt
     path = f"{config.model.showo.tuned_model_path}/unwrapped_model/pytorch_model.bin"

@@ -9,11 +9,7 @@ import git
 import hydra
 import numpy as np
 import pytorch_lightning
-try:
-    from pytorch_lightning.utilities.cloud_io import load as pl_load
-except Exception:
-    # lightning>=2.x moved cloud io helpers to lightning_fabric
-    from lightning_fabric.utilities.cloud_io import _load as pl_load
+from pytorch_lightning.utilities.cloud_io import load as pl_load
 import torch
 import tqdm
 

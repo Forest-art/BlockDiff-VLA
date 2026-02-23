@@ -189,11 +189,8 @@ def load_dataset_statistics(train_dataset_dir, val_dataset_dir, transforms):
     for dataset_type in ["train", "val"]:
         try:
             statistics = OmegaConf.load(Path(paths[dataset_type]) / "statistics.yaml")
-            # Hack for maintaining compatibility across forks with different module paths.
-            stats_yaml = OmegaConf.to_yaml(statistics)
-            stats_yaml = stats_yaml.replace("calvin_agent", "policy_models")
-            stats_yaml = stats_yaml.replace("lfp", "policy_models")
-            statistics = OmegaConf.create(stats_yaml)
+            # Hack for maintaining two repositories with transforms
+            statistics = OmegaConf.create(OmegaConf.to_yaml(statistics).replace("calvin_agent", "policy_models"))
             # this ugly piece of code only exists because OmegaConf actually can't merge ListConfigs.
             # we do not want to override everything, but just the transforms that are specified in both
             # see https://stackoverflow.com/questions/61315623/omegaconf-can-i-influence-how-lists-are-merged
