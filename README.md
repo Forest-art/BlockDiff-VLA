@@ -54,6 +54,69 @@ Key artifacts:
 - `results/quick_arvla_offline_eval.json`
 - `results/summary.md`
 
+### Config Quick Setup (What to fill to run fast)
+Use `config/debug_arvla_1step.yaml` as the fastest base config. You only need to make sure the following keys are valid:
+
+| Config key | Required | Example value | Notes |
+|---|---|---|---|
+| `experiment.tracker` | Yes | `"tensorboard"` | Keep TensorBoard-only environment |
+| `experiment.output_dir` | Yes | `"outputs/quick_arvla"` | Checkpoints + logs |
+| `model.vq_model.vq_model_name` | Yes | `"/path/to/magvitv2"` | Local MagVITv2 checkpoint dir |
+| `model.showo.pretrained_model_path` | Yes | `"/path/to/show-o-w-clip-vit-512x512"` | Show-o pretrained dir |
+| `model.showo.llm_model_path` | Yes | `"/path/to/phi-1_5"` | Phi/Qwen tokenizer+weights dir |
+| `dataset.params.train_pre_shards_path_or_url` | Yes | `"/path/to/*processed*/training"` | Must contain `dataset_info.json` |
+| `dataset.params.train_mmu_shards_path_or_url` | Yes | `"./dummy_data/llava_tuning_665k_data"` | Keep dummy MMU for smoke |
+| `training.max_train_steps` | Yes | `3` or `5` | Debug run only |
+
+Fastest no-CALVIN-env debug flow (train a few steps + offline eval):
+
+```bash
+# 1) (optional) build a tiny processed split from CALVIN debug frames
+python scripts/prepare_calvin_debug_processed.py \
+  --source-split-dir /path/to/calvin_debug_dataset/training \
+  --output-dir ./debug_data/calvin_debug_processed_training \
+  --instruction "debug instruction" \
+  --max-frames 256
+
+# 2) quick training (override paths from command line)
+python train_upvla.py \
+  "config=$(pwd)/config/debug_arvla_1step.yaml" \
+  "experiment.tracker=tensorboard" \
+  "training.max_train_steps=5" \
+  "experiment.output_dir=$(pwd)/outputs/quick_arvla" \
+  "dataset.params.train_pre_shards_path_or_url=$(pwd)/debug_data/calvin_debug_processed_training" \
+  "dataset.params.train_mmu_shards_path_or_url=$(pwd)/dummy_data/llava_tuning_665k_data" \
+  "model.vq_model.vq_model_name=/path/to/magvitv2" \
+  "model.showo.pretrained_model_path=/path/to/show-o-w-clip-vit-512x512" \
+  "model.showo.llm_model_path=/path/to/phi-1_5"
+
+# 3) point eval model config to your new checkpoint
+export CKPT_DIR=$(ls -d outputs/quick_arvla/checkpoint-* | sort -V | tail -n 1)
+python - <<'PY'
+import os
+from omegaconf import OmegaConf
+cfg = OmegaConf.load("policy_rollout/debug_arvla_model.yaml")
+cfg.model.showo.tuned_model_path = os.environ["CKPT_DIR"]
+OmegaConf.save(cfg, "policy_rollout/debug_arvla_model.yaml")
+print("updated policy_rollout/debug_arvla_model.yaml")
+PY
+
+# 4) offline eval (no calvin_env / no rollout)
+python scripts/eval_upvla_offline_actions.py \
+  --dataset-root /path/to/calvin_debug_dataset \
+  --split validation \
+  --model-config $(pwd)/policy_rollout/debug_arvla_model.yaml \
+  --device cuda:0 \
+  --start-only \
+  --max-samples 1 \
+  --output-json outputs/quick_arvla_offline_eval.json
+```
+
+If you only need one command on SuperPOD, use:
+```bash
+TRAIN_STEPS=5 sbatch scripts/quick_debug_ar_eval.sbatch
+```
+
 ### SuperPOD one-job debug pipeline (optional)
 For HKUST SuperPOD users, an end-to-end Slurm smoke pipeline is provided:
 ```bash
