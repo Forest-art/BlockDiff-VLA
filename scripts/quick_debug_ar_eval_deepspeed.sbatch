@@ -91,13 +91,18 @@ then
 fi
 
 if ! python - <<'PY'
-import importlib.util
 import sys
-sys.exit(0 if importlib.util.find_spec("deepspeed") else 1)
+try:
+    import deepspeed
+    from packaging.version import Version
+except Exception:
+    sys.exit(1)
+v = Version(deepspeed.__version__)
+sys.exit(0 if Version("0.18.0") <= v < Version("0.19.0") else 1)
 PY
 then
   if [[ "$INSTALL_DEEPSPEED" != "1" ]]; then
-    echo "[ERROR] deepspeed is not installed and INSTALL_DEEPSPEED=0"
+    echo "[ERROR] deepspeed is missing/incompatible and INSTALL_DEEPSPEED=0"
     exit 1
   fi
   python -m pip install "${PIP_FLAGS[@]}" "${DEEPSPEED_SPEC}"
