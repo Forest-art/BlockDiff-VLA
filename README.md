@@ -57,6 +57,18 @@ If your cluster does not support venv activation in job scripts:
 ```bash
 ENV_MODE=system TRAIN_STEPS=5 sbatch scripts/quick_debug_ar_eval.sbatch
 ```
+
+If you want to smoke-test with DeepSpeed (show-o large model path):
+```bash
+TRAIN_STEPS=1 sbatch scripts/quick_debug_ar_eval_deepspeed.sbatch
+```
+This script uses `accelerate + deepspeed` and auto-installs `deepspeed>=0.18,<0.19` when missing (`INSTALL_DEEPSPEED=1` by default).
+You can override the DeepSpeed pip spec if needed:
+```bash
+DEEPSPEED_SPEC='deepspeed>=0.18,<0.19' TRAIN_STEPS=1 sbatch scripts/quick_debug_ar_eval_deepspeed.sbatch
+```
+DeepSpeed smoke outputs are saved under: `/home/xlubl/blockdiff_quick_ar_ds_<jobid>/`
+
 Outputs are saved under:
 `/home/xlubl/blockdiff_quick_ar_<jobid>/`
 
