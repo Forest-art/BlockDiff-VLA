@@ -12,6 +12,13 @@ from training.utils import image_transform
 from PIL import Image
 
 
+_STRICT_CALVIN_PATH_RESOLVE = os.environ.get("UPVLA_STRICT_PATH_RESOLVE", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
+
 def _resolve_calvin_frame_path(dataset_path, raw_path):
     """Resolve frame path from dataset_info.json across different machines.
 
@@ -21,13 +28,25 @@ def _resolve_calvin_frame_path(dataset_path, raw_path):
     - stale absolute paths from another clone root
     """
     dataset_root = os.path.abspath(dataset_path)
-    raw_path = str(raw_path)
+    norm_raw = os.path.normpath(str(raw_path))
 
+    # Fast mode (default): pure string rewrite, no os.path.exists probing per frame.
+    # This keeps dataloader creation speed close to the official UP-VLA behavior.
+    if not _STRICT_CALVIN_PATH_RESOLVE:
+        if os.path.isabs(norm_raw):
+            ds_name = os.path.basename(dataset_root)
+            marker = os.sep + ds_name + os.sep
+            if marker in norm_raw:
+                suffix = norm_raw.split(marker, 1)[1]
+                return os.path.join(dataset_root, suffix)
+            return norm_raw
+        return os.path.normpath(os.path.join(dataset_root, norm_raw))
+
+    raw_path = str(raw_path)
     candidates = []
     candidates.append(raw_path)
     candidates.append(os.path.join(dataset_root, raw_path))
 
-    norm_raw = os.path.normpath(raw_path)
     ds_name = os.path.basename(dataset_root)
     marker = os.sep + ds_name + os.sep
     if marker in norm_raw:
