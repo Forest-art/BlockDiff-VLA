@@ -219,6 +219,64 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   train_upvla.py config=./config/bdvla_action_tuning_qwen3_elastic.yaml
 ```
 
+### 🛸 DeepSpeed Launch for AR-UPVLA Baseline (copy-ready)
+Single GPU debug/start command:
+```bash
+cd /path/to/BlockDiff-VLA
+export PYTHONPATH=$(pwd)
+CUDA_VISIBLE_DEVICES=0 accelerate launch \
+  --config_file ./accelerate_configs/1_gpu_deepspeed_zero2.yaml \
+  --main_process_port 29666 \
+  train_upvla.py \
+  "config=$(pwd)/config/upvla_action_tuning.yaml" \
+  "experiment.tracker=tensorboard" \
+  "experiment.output_dir=$(pwd)/outputs/upvla_ar_ds" \
+  "model.framework=upvla" \
+  "training.text_objective=ar" \
+  "training.text_coeff=0.0" \
+  "training.action_bd_coeff=0.0" \
+  "dataset.params.train_pre_shards_path_or_url=/path/to/calvin_processed_training" \
+  "dataset.params.train_mmu_shards_path_or_url=/path/to/llava_tuning_665k_data" \
+  "model.vq_model.vq_model_name=/path/to/magvitv2" \
+  "model.showo.pretrained_model_path=/path/to/show-o-w-clip-vit-512x512" \
+  "model.showo.llm_model_path=/path/to/phi-1_5"
+```
+
+4-GPU training command:
+```bash
+cd /path/to/BlockDiff-VLA
+export PYTHONPATH=$(pwd)
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
+  --config_file ./accelerate_configs/4_gpus_deepspeed_zero2.yaml \
+  --main_process_port 29666 \
+  train_upvla.py \
+  "config=$(pwd)/config/upvla_action_tuning.yaml" \
+  "experiment.tracker=tensorboard" \
+  "experiment.output_dir=$(pwd)/outputs/upvla_ar_ds" \
+  "model.framework=upvla" \
+  "training.text_objective=ar" \
+  "training.text_coeff=0.0" \
+  "training.action_bd_coeff=0.0" \
+  "dataset.params.train_pre_shards_path_or_url=/path/to/calvin_processed_training" \
+  "dataset.params.train_mmu_shards_path_or_url=/path/to/llava_tuning_665k_data" \
+  "model.vq_model.vq_model_name=/path/to/magvitv2" \
+  "model.showo.pretrained_model_path=/path/to/show-o-w-clip-vit-512x512" \
+  "model.showo.llm_model_path=/path/to/phi-1_5"
+```
+
+Parameter mapping you usually need to replace:
+- `dataset.params.train_pre_shards_path_or_url`: your processed CALVIN-style training data root (must contain `dataset_info.json`)
+- `dataset.params.train_mmu_shards_path_or_url`: your MMU json/image data root (for smoke you can keep repo dummy)
+- `model.vq_model.vq_model_name`: MagVITv2 checkpoint path or HF id
+- `model.showo.pretrained_model_path`: Show-o base checkpoint path or HF id
+- `model.showo.llm_model_path`: LLM tokenizer/model path (e.g. Phi-1.5)
+- `experiment.output_dir`: where checkpoints/logs are saved
+
+If you only want smoke training for a few steps, append:
+```bash
+"training.max_train_steps=5"
+```
+
 Text-objective switches:
 - `training.text_objective: "ar" | "mdm" | "bd"`
 - `training.text_coeff`: weight for selected text objective
