@@ -2,12 +2,27 @@ import logging
 import os
 from typing import Any, Dict, Tuple, Union
 
-import gym
+try:
+    import gym
+except Exception:
+    try:
+        import gymnasium as gym
+    except Exception as exc:
+        raise ModuleNotFoundError(
+            "gym (or gymnasium) is required for CALVIN rollout."
+        ) from exc
 import numpy as np
 import torch
 
-from calvin_env.envs.play_table_env import get_env
-from calvin_env.utils.utils import EglDeviceNotFoundError, get_egl_device_id
+try:
+    from calvin_env.envs.play_table_env import get_env
+    from calvin_env.utils.utils import EglDeviceNotFoundError, get_egl_device_id
+    _CALVIN_IMPORT_ERROR = None
+except Exception as exc:
+    get_env = None
+    EglDeviceNotFoundError = RuntimeError
+    get_egl_device_id = None
+    _CALVIN_IMPORT_ERROR = exc
 from policy_models.datasets.utils.episode_utils import process_depth, process_rgb, process_state
 
 logger = logging.getLogger(__name__)
@@ -15,9 +30,20 @@ logger = logging.getLogger(__name__)
 
 class HulcWrapper(gym.Wrapper):
     def __init__(self, dataset_loader, device, show_gui=False, **kwargs):
-        self.set_egl_device(device)
+        if _CALVIN_IMPORT_ERROR is not None:
+            raise ModuleNotFoundError(
+                "calvin_env is required for CALVIN rollout. "
+                "Install it from https://github.com/mees/calvin"
+            ) from _CALVIN_IMPORT_ERROR
+        use_egl = False
+        if use_egl:
+            self.set_egl_device(device)
         env = get_env(
-            dataset_loader.abs_datasets_dir, show_gui=show_gui, obs_space=dataset_loader.observation_space, **kwargs
+            dataset_loader.abs_datasets_dir,
+            show_gui=show_gui,
+            obs_space=dataset_loader.observation_space,
+            use_egl=use_egl,
+            **kwargs,
         )
         super(HulcWrapper, self).__init__(env)
         self.observation_space_keys = dataset_loader.observation_space
@@ -29,9 +55,18 @@ class HulcWrapper(gym.Wrapper):
 
     @staticmethod
     def set_egl_device(device):
+        if get_egl_device_id is None:
+            raise ModuleNotFoundError(
+                "calvin_env utils are unavailable. Install CALVIN first."
+            )
+        if isinstance(device, str):
+            device = torch.device(device)
+        if device.type != "cuda":
+            logger.info("CPU device detected, skipping EGL_VISIBLE_DEVICES setup.")
+            return
         if "EGL_VISIBLE_DEVICES" in os.environ:
             logger.warning("Environment variable EGL_VISIBLE_DEVICES is already set. Is this intended?")
-        cuda_id = device.index if device.type == "cuda" else 0
+        cuda_id = 0 if device.index is None else device.index
         try:
             egl_id = get_egl_device_id(cuda_id)
         except EglDeviceNotFoundError:

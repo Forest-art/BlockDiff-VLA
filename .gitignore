@@ -1,0 +1,12 @@
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+logs/
+outputs/
+wandb/
+upvla_env/
+debug_data/
+dummy_data/tiny_phi_config*/
+
+policy_rollout/*_local.yaml

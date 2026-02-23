@@ -6,9 +6,12 @@ from pathlib import Path
 import sys
 import time
 from PIL import Image
-import sys
 
-sys.path.insert(0, "/cephfs/cjyjk/UnifiedVLM-Manipulation/UP-VLA")
+# Make local imports stable no matter where the script is launched from.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from models import Upvla, MAGVITv2, CLIPVisionTower
 from training.prompting_utils import UniversalPrompting_w_action, \
     create_attention_mask_predict_next_for_future_prediction
@@ -25,27 +28,34 @@ SYSTEM_PROMPT = ""
 SYSTEM_PROMPT_LEN = 0
 # from open3d.examples.visualization.to_mitsuba import dataset
 
-# This is for using the locally installed repo clone when using slurm
-sys.path.insert(0, Path(__file__).absolute().parents[1].as_posix())
-import importlib
-import models
-
-importlib.reload(models)
 import hydra
 import numpy as np
 from pytorch_lightning import seed_everything
-from termcolor import colored
+try:
+    from termcolor import colored
+except Exception:
+    def colored(text, *_args, **_kwargs):
+        return text
 import torch
 from tqdm.auto import tqdm
-import wandb
 import torch.distributed as dist
+try:
+    import wandb
+except Exception:
+    wandb = None
 
 from policy_evaluation.multistep_sequences import get_sequences
 from policy_evaluation.utils import get_default_beso_and_env, get_env_state_for_initial_condition, join_vis_lang
 from policy_models.utils.utils import get_last_checkpoint
-from policy_models.rollout.rollout_video import RolloutVideo
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_from_original_cwd(path_like: str) -> Path:
+    path = Path(path_like).expanduser()
+    if path.is_absolute():
+        return path
+    return (Path(hydra.utils.get_original_cwd()) / path).resolve()
 
 
 def get_video_tag(i):
@@ -116,11 +126,12 @@ def print_and_save(total_results, plan_dicts, cfg, log_dir=None):
             print(f"{task}: {cnt_success[task]} / {total[task]} |  SR: {cnt_success[task] / total[task] * 100:.1f}%")
 
         data = {"avg_seq_len": avg_seq_len, "chain_sr": chain_sr, "task_info": task_info}
-        wandb.log({
-            "avrg_performance/avg_seq_len": avg_seq_len,
-            "avrg_performance/chain_sr": chain_sr,
-            "detailed_metrics/task_info": task_info
-        })
+        if wandb is not None:
+            wandb.log({
+                "avrg_performance/avg_seq_len": avg_seq_len,
+                "avrg_performance/chain_sr": chain_sr,
+                "detailed_metrics/task_info": task_info
+            })
         current_data[epoch] = data
 
         print()
@@ -142,6 +153,7 @@ def evaluate_policy(model, env, lang_embeddings, cfg, num_videos=0, save_dir=Non
 
     # video stuff
     if num_videos > 0:
+        from policy_models.rollout.rollout_video import RolloutVideo
         rollout_video = RolloutVideo(
             logger=logger,
             empty_cache=False,
@@ -341,46 +353,94 @@ def rollout(env, model, task_oracle, cfg, subtask, lang_embeddings, val_annotati
     return False
 
 
-@hydra.main(config_path="../policy_conf", config_name="calvin_evaluate_upvla")
+@hydra.main(version_base=None, config_path="../policy_conf", config_name="calvin_evaluate_upvla")
 def main(cfg):
     log_wandb = cfg.log_wandb
-    torch.cuda.set_device(cfg.device)
+    if log_wandb and wandb is None:
+        raise RuntimeError("cfg.log_wandb=True but wandb is not installed in this environment.")
+    using_cpu = str(cfg.device).lower() == "cpu"
+    if not using_cpu:
+        torch.cuda.set_device(int(cfg.device))
     seed_everything(0, workers=True)  # type:ignore
-    # evaluate a custom model
-    # checkpoints = [get_last_checkpoint(Path(cfg.train_folder))]
+
     from omegaconf import OmegaConf
-    model_config = OmegaConf.load(cfg.model_config)
-    # print(model_config.experiment)
+
+    if cfg.model_config is None or str(cfg.model_config).strip() == "":
+        raise ValueError(
+            "cfg.model_config is empty. Set it to a yaml path, e.g. "
+            "'policy_rollout/arvla_model.yaml' (or mdmvla_model.yaml / bdvla_model.yaml) and override via CLI."
+        )
+    model_config_path = _resolve_from_original_cwd(str(cfg.model_config))
+    if not model_config_path.exists():
+        raise FileNotFoundError(f"model_config not found: {model_config_path}")
+    model_config = OmegaConf.load(model_config_path)
+
+    if cfg.dataset_path is None or str(cfg.dataset_path).strip() == "":
+        raise ValueError("cfg.dataset_path is empty. Please set Calvin dataset root path.")
+    dataset_path = _resolve_from_original_cwd(str(cfg.dataset_path))
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Calvin dataset path not found: {dataset_path}")
+    required_dataset_entries = [
+        dataset_path / "training",
+        dataset_path / "validation",
+        dataset_path / "validation" / ".hydra" / "merged_config.yaml",
+    ]
+    missing_entries = [str(p) for p in required_dataset_entries if not p.exists()]
+    if missing_entries:
+        raise FileNotFoundError(
+            "Calvin dataset is missing required files/folders:\n"
+            + "\n".join(missing_entries)
+            + "\nMake sure dataset_path points to an official CALVIN split root (e.g. task_ABC_D)."
+        )
+
+    # Rebase common local paths in model config to original cwd when relative.
+    for key in ("llm_model_path", "pretrained_model_path", "tuned_model_path"):
+        value = model_config.model.showo.get(key, None)
+        if isinstance(value, str) and value.startswith("./"):
+            model_config.model.showo[key] = str(_resolve_from_original_cwd(value))
+
     lang_embeddings = None
     env = None
     results = {}
     plans = {}
     print(cfg.device)
     env, _, lang_embeddings = get_default_beso_and_env(
-        dataset_path=cfg.dataset_path,
+        dataset_path=str(dataset_path),
         env=env,
         lang_embeddings=lang_embeddings,
         device_id=cfg.device,
         cfg=cfg,
     )
 
-    device = torch.device(f"cuda:{cfg.device}")
     checkpoint = model_config.model.showo.tuned_model_path
     model = get_upvla_agent(model_config, cfg)
+    log_dir = None
     if log_wandb:
         log_dir = get_log_dir(model_config.model.showo.tuned_model_path + "/calvin_evaluation")
         os.makedirs(log_dir / "wandb", exist_ok=False)
-        results[checkpoint], plans[checkpoint] = evaluate_policy(
-            model, env, lang_embeddings, cfg, num_videos=cfg.num_videos, save_dir=Path(log_dir))
-        # print_and_save(results, plans, cfg, log_dir=log_dir)
-        # run.finish()
+    results[checkpoint], plans[checkpoint] = evaluate_policy(
+        model,
+        env,
+        lang_embeddings,
+        cfg,
+        num_videos=cfg.num_videos,
+        save_dir=Path(log_dir) if log_dir is not None else None,
+    )
+    avg_seq = float(np.mean(results[checkpoint])) if len(results[checkpoint]) > 0 else 0.0
+    chain_sr = count_success(results[checkpoint]) if len(results[checkpoint]) > 0 else [0.0] * 5
+    logger.info(f"Evaluation finished. avg_successful_seq_len={avg_seq:.4f}")
+    logger.info(
+        "Chain success rates: "
+        + ", ".join([f"{i + 1}/5={sr * 100:.1f}%" for i, sr in enumerate(chain_sr)])
+    )
 
 
 def get_upvla_agent(model_config, cfg):
     #########################
     # showo_vla prepare  #
     #########################
-    device = torch.device(f"cuda:{cfg.device}")
+    using_cpu = str(cfg.device).lower() == "cpu"
+    device = torch.device("cpu") if using_cpu else torch.device(f"cuda:{int(cfg.device)}")
     config = model_config
     tokenizer = AutoTokenizer.from_pretrained(config.model.showo.llm_model_path, padding_side="left")
 
@@ -405,12 +465,20 @@ def get_upvla_agent(model_config, cfg):
     vq_model.eval()
 
     model = Upvla.from_pretrained(
-        config.model.showo.pretrained_model_path, low_cpu_mem_usage=False, act_step=config.act_step).to(device)
+        config.model.showo.pretrained_model_path,
+        low_cpu_mem_usage=False,
+        act_step=config.act_step,
+        framework=str(config.model.get("framework", "upvla")),
+    ).to(device)
     assert config.model.showo.vocab_size == model.vocab_size
     # load from tuned ckpt
-    path = f"{config.model.showo.tuned_model_path}/unwrapped_model/pytorch_model.bin"
+    path = Path(config.model.showo.tuned_model_path).expanduser() / "unwrapped_model" / "pytorch_model.bin"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Checkpoint not found: {path}. Please set model.showo.tuned_model_path correctly."
+        )
     print(f"Resuming from checkpoint {path}")
-    state_dict = torch.load(path, map_location="cpu")
+    state_dict = torch.load(str(path), map_location="cpu")
     model.load_state_dict(state_dict, strict=True)
     del state_dict
     model.eval()

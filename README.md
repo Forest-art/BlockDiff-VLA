@@ -1,41 +1,70 @@
 <div align="center">
-<h2><center>👉 UP-VLA: A Unified Understanding and Prediction Model for Embodied Agent</h2>
-
-[Jianke Zhang*](), [Yanjiang Guo*](), [Yucheng Hu*](), [Xiaoyu Chen](), [Xiang Zhu](), [Jianyu Chen]()
-
-
-<a href='https://arxiv.org/abs/2501.18867'><img src='https://img.shields.io/badge/ArXiv-2501.18867-red'></a> 
-<!-- <a href='https://sites.google.com/view/pad-paper'><img src='https://img.shields.io/badge/Project-Page-Blue'></a>  -->
+<h2><center>👉 BlockDiff-VLA: Block-Diffusion Text Objective for Vision-Language-Action</h2>
 
 </div>
-<div align=center>
-<img src="gallery/up_vla.jpg" alt="UP-VLA samples" align="middle"/>
-</div>
+This repository contains the `BlockDiff-VLA` training and evaluation suite.
 
+This codebase now supports three text-objective baselines while keeping **vision/image and action objectives unchanged**:
+- `AR-VLA`: text objective is autoregressive LM (`text_objective=ar`)
+- `MDM-VLA`: text objective is masked denoising (`text_objective=mdm`)
+- `BD-VLA`: text objective is native block diffusion (`text_objective=bd`)
 
-
-This repo is the official PyTorch implementation for ICML 2025 paper [**UP-VLA**](https://arxiv.org/abs/2501.18867).
-
-<!-- ## Friendship Link 🔥
-
-🔥🔥🔥**Dec. 2024:** We are excited to announce our latest work [**Video Prediction Policy: A Generalist Robot Policy with Predictive Visual Representations**](https://video-prediction-policy.github.io/) which is even stronger and faster. Video-Prediction-Policy finetune a video foundation model on manipulation domain with internet maniplation datasets to guide action learning. -->
+All three keep the same image objective and continuous action regression path by default.
 
 
 ##  Installation 🛠️
-First, download and set up the environment.
+Default setup (minimal, no extra GitHub repositories required):
 
 ```bash
-git clone https://github.com/CladernyJorn/UP-VLA.git
+git clone <your_repo_url>/BlockDiff-VLA.git
+cd BlockDiff-VLA
+python -m venv blockdiff_vla_env
+source blockdiff_vla_env/bin/activate
+pip install -r requirements_minimal.txt \
+  omegaconf accelerate==0.21.0 tensorboard lightning hydra-core termcolor gym==0.26.2 sentencepiece
+```
+
+If you need full training stack instead of minimal stack:
+```bash
 pip install -r requirements.txt
 ```
-Login your wandb account on your machine or server.
+
+Default tracker backend is TensorBoard across provided configs. Launch dashboard with:
 ```bash
-wandb login <your wandb keys>
+tensorboard --logdir ./outputs
 ```
+
+### Quick Start Training (No CALVIN Env / No Extra GitHub)
+Minimal train-step smoke test (uses only repo-provided dummy data):
+```bash
+python scripts/smoke_upvla_minimal.py \
+  --dataset-path ./dummy_data/calvin_processed_training
+```
+
+Quick 3-step debug training + offline eval (Slurm 1 GPU, still no `calvin_env` dependency):
+```bash
+sbatch scripts/quick_debug_ar_eval.sbatch
+TRAIN_STEPS=5 sbatch scripts/quick_debug_ar_eval.sbatch
+```
+Outputs are saved under:
+`/home/xlubl/blockdiff_quick_ar_<jobid>/`
+
+Key artifacts:
+- `outputs/quick_arvla/checkpoint-*`
+- `results/quick_arvla_offline_eval.json`
+- `results/summary.md`
+
+### SuperPOD one-job debug pipeline (optional)
+For HKUST SuperPOD users, an end-to-end Slurm smoke pipeline is provided:
+```bash
+sbatch scripts/blockdiff_debug_pip_home.sbatch
+```
+This submits AR/MDM/BD 1-step training + offline eval in one job and writes a final summary table to:
+`/home/xlubl/blockdiff_debug_run_<jobid>/results/summary.md`
 
 If you want to perform experiments in [Calvin](https://arxiv.org/pdf/2112.03227), you need also prepare with the calvin environment following the official repo of [Calvin](https://github.com/mees/calvin.git).
 
-Download [showlab/show-o-w-clip-vit-512x512](https://huggingface.co/showlab/show-o-w-clip-vit-512x512), [phi-1.5](https://huggingface.co/microsoft/phi-1_5) or other show-o backbone you want from the huggingface. UP-VLA is built on the backbone of `show-o-w-clip-vit-512x512` by default. Prepare the backbone checkpoints under the `./showlab` folder.
+Download [showlab/show-o-w-clip-vit-512x512](https://huggingface.co/showlab/show-o-w-clip-vit-512x512), [phi-1.5](https://huggingface.co/microsoft/phi-1_5), or another supported backbone from Hugging Face. Prepare the backbone checkpoints under `./showlab`.
 
 ## Data Preparation
 ### Embodied Data
@@ -56,7 +85,7 @@ See the implementation of `DataProvider` class in `training/future_view_predctio
 ### MMU Data
 We also use the [llava_tuning_665k_data](https://huggingface.co/datasets/liuhaotian/LLaVA-Instruct-150K/blob/main/llava_v1_5_mix665k.json) for cotraining to maintain model's multimodal understanding capability. If you don't want to cotrain with MMU dataset for training, you can modify the config file and exclude the mmu dataloader in `train_upvla.py`.
 
-## Train UP-VLA 🛸 
+## Train Baselines 🛸
 ### 🛸 Training requirements
 Our experiments are run on 4 A800 80G GPU. Under this setting, the training process takes ~70G GPU memory. 
 
@@ -68,40 +97,130 @@ If you have limited GPU memory, you can modify the batchsize setting in `config/
 CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --config_file ./accelerate_configs/4_gpus_deepspeed_zero2.yaml --main_process_port=8888 train_upvla.py config=./config/upvla_pred_tuning.yaml
 ```
 
-(2) Prediction and Understanding Pretraining：
+(2) Action-stage training (AR text baseline):
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --config_file ./accelerate_configs/4_gpus_deepspeed_zero2.yaml --main_process_port=8888 train_upvla.py config=./config/upvla_action_tuning.yaml
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
+  --config_file ./accelerate_configs/4_gpus_deepspeed_zero2.yaml \
+  --main_process_port=8888 \
+  train_upvla.py config=./config/arvla_action_tuning.yaml
 ```
 
-You can skip the pretraining stage or using MMU dataset cotraining for policy learning by modify the data_path and coeff arguments in config files.
+(3) Action-stage training (MDM text baseline):
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
+  --config_file ./accelerate_configs/4_gpus_deepspeed_zero2.yaml \
+  --main_process_port=8888 \
+  train_upvla.py config=./config/mdmvla_action_tuning.yaml
+```
+
+(4) Action-stage training (Block Diffusion text baseline):
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
+  --config_file ./accelerate_configs/4_gpus_deepspeed_zero2.yaml \
+  --main_process_port=8888 \
+  train_upvla.py config=./config/bdvla_action_tuning.yaml
+```
+
+(5) Action-stage training (Qwen3 + Elastic Block Diffusion text baseline):
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
+  --config_file ./accelerate_configs/4_gpus_deepspeed_zero2.yaml \
+  --main_process_port=8888 \
+  train_upvla.py config=./config/bdvla_action_tuning_qwen3_elastic.yaml
+```
+
+Text-objective switches:
+- `training.text_objective: "ar" | "mdm" | "bd"`
+- `training.text_coeff`: weight for selected text objective
+- `training.mmu_coeff`: optional extra AR/MMU loss weight
+
+`AR-VLA` is the default `UP-VLA` setting (`model.framework: "upvla"` + `training.text_objective: "ar"`).
+
+Block diffusion text knobs:
+- `block_diffusion.text_enabled`
+- `block_diffusion.block_size`
+- `block_diffusion.elastic_block_enabled`
+- `block_diffusion.block_size_candidates`
+- `block_diffusion.mask_eps`
+- `block_diffusion.complementary_mask`
+
+Qwen3 backbone knobs:
+- `model.showo.llm_backbone: "auto"`
+- `model.showo.trust_remote_code: true`
+- `model.showo.auto_set_llm_vocab_size: true` (recommended for non-Phi backbones)
+
+MDM text knobs:
+- `text_mdm.min_mask_ratio`
+- `text_mdm.max_mask_ratio`
+
+Action is kept on original regression by default (`block_diffusion.action_enabled: false`, `block_diffusion.action_infer_enabled: false`).
 
 
 ## Evaluation 📊
 
+### 📊 Minimal-dependency offline action evaluation (no `calvin_env`)
+If you cannot install full CALVIN simulation dependencies, you can run offline action metrics:
+```bash
+PYTHONPATH=$(pwd) python scripts/eval_upvla_offline_actions.py \
+  --dataset-root /path/to/calvin_debug_dataset \
+  --split validation \
+  --model-config $(pwd)/policy_rollout/arvla_model.yaml \
+  --device cuda:0 \
+  --start-only \
+  --max-samples 100 \
+  --output-json outputs/offline_eval_100.json
+```
+This script supports `arvla`, `mdmvla`, and `bdvla` via `model.framework` in the model yaml.
+
 ### 📊 Rollout on Calvin benchmark
-You should install Calvin as described in installation section. Remember to reset the `dataset_path, root_data_dir` in `policy_conf/calvin_evaluate_upvla.yaml` with the origin calvin abcd dataset, and set the `model_config` to direct path of `policy_rollout/upvla_model.py`. Then, you need to modify `tuned_model_path` in `policy_rollout/upvla_model.yaml` to specify the checkpoint, in which you can also change other settings of the model for rollout. You can directly use our provided checkpoint or your saved checkpoint using our training script. 
+Optional advanced path (requires additional CALVIN GitHub environment install). Then set:
+- `policy_conf/calvin_evaluate_upvla.yaml`: `dataset_path` (and `root_data_dir`) to your Calvin `task_ABC_D` root.
+- `model_config` to one of:
+  - `policy_rollout/arvla_model.yaml` (AR text baseline)
+  - `policy_rollout/mdmvla_model.yaml` (MDM text baseline)
+  - `policy_rollout/bdvla_model.yaml` (BD text baseline)
+- `tuned_model_path` in the selected model yaml to your checkpoint directory.
+
+Make sure rollout dependencies are installed in your env:
+```bash
+pip install hydra-core termcolor gym==0.26.2
+
+# install CALVIN (needed by policy_models.wrappers.hulc_wrapper.HulcWrapper)
+git clone --depth 1 --recurse-submodules https://github.com/mees/calvin.git /path/to/calvin
+pip install -e /path/to/calvin/calvin_env/tacto
+pip install -e /path/to/calvin/calvin_env
+```
+
+`dataset_path` must point to an official CALVIN split root (e.g. `task_ABC_D`) that contains:
+- `training/`
+- `validation/`
+- `validation/.hydra/merged_config.yaml`
 
 Lastly, execute the following command:
 ```bash
-python policy_rollout/calvin_evaluate_upvla.py
+PYTHONPATH=$(pwd) python policy_rollout/calvin_evaluate_upvla.py \
+  dataset_path=/path/to/calvin/task_ABC_D \
+  model_config=$(pwd)/policy_rollout/arvla_model.yaml \
+  device=0
 ```
+For MDM/BD rollout, switch `model_config` to `$(pwd)/policy_rollout/mdmvla_model.yaml` or `$(pwd)/policy_rollout/bdvla_model.yaml`.
 After running this command, you can find the predicted images in the folder of `tuned_model_path` which visualize both the current observations and future predictions.
 
 ### 📊 Rollout in your own embodiments
 For your own data, you should first train the model with your own dataloader. For rollout, we provide a script `./policy_rollout/policy_upvla.py` as a reference, which can be directly used in Franka Emika Robotarm.
 
 ## CheckPoints 📷
-For reproduction results on Calvin dataset, we provide trained [checkpoint](https://huggingface.co/CladernyJorn/UP-VLA-Calvin/tree/main) on Calvin ABC-D task for download.
+Release checkpoints will be published in a dedicated BlockDiff-VLA model repository.
 
 ## Bibtex 
 🌟 If you find our work helpful, please leave us a star and cite our paper. Thank you!
 ```
-@article{zhang2025up,
-  title={UP-VLA: A Unified Understanding and Prediction Model for Embodied Agent},
-  author={Zhang, Jianke and Guo, Yanjiang and Hu, Yucheng and Chen, Xiaoyu and Zhu, Xiang and Chen, Jianyu},
-  journal={arXiv preprint arXiv:2501.18867},
-  year={2025}
+@misc{blockdiffvla2026,
+  title={BlockDiff-VLA},
+  author={BlockDiff-VLA Team},
+  year={2026},
+  note={Project repository}
 }
 ```
 ## Acknowledgments
-This work is based on [Show-o](https://github.com/showlab/Show-o), [Phi-1.5](https://huggingface.co/microsoft/phi-1_5) and [LLaVA](https://github.com/haotian-liu/LLaVA). Thanks to all the authors for their great work.
+This project builds on open-source model and tooling ecosystems including Show-o, Phi, and LLaVA.

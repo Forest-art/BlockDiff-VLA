@@ -4,7 +4,6 @@ from typing import Dict, Tuple, Union
 
 import numpy as np
 from omegaconf import DictConfig
-import pyhash
 import torch
 from torch.utils.data import Dataset
 
@@ -17,7 +16,14 @@ from policy_models.datasets.utils.episode_utils import (
     process_state,
 )
 
-hasher = pyhash.fnv1_32()
+try:
+    import pyhash
+    hasher = pyhash.fnv1_32()
+except Exception:
+    import hashlib
+
+    def hasher(s: str) -> int:
+        return int(hashlib.md5(s.encode("utf-8")).hexdigest()[:8], 16)
 logger = logging.getLogger(__name__)
 
 

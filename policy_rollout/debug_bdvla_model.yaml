@@ -1,0 +1,64 @@
+wandb:
+  entity: null
+  resume: "never"
+
+experiment:
+  project: "BlockDiff-VLA-debug"
+  name: "debug-bdvla-eval"
+  output_dir: "debug-bdvla-eval"
+
+act_step: 10
+
+model:
+  framework: "bdvla"
+  vq_model:
+    type: "magvitv2"
+    vq_model_name: "/home/xlubl/upvla_assets/magvitv2"
+
+  showo:
+    pretrained_model_path: "/home/xlubl/upvla_assets/show-o-w-clip-vit-512x512"
+    tuned_model_path: "/project/peilab/luxiaocheng/projects/BlockDiff-VLA/outputs/debug-bdvla-1step/checkpoint-1"
+    w_clip_vit: True
+    vocab_size: 58498
+    llm_vocab_size: 50295
+    llm_model_path: "/home/xlubl/upvla_assets/phi-1_5"
+    codebook_size: 8192
+    num_vq_tokens: 1024
+    num_new_special_tokens: 10
+
+  vla:
+    num_view: 1
+
+  gradient_checkpointing: True
+
+block_diffusion:
+  block_size: 32
+  mask_eps: 1.0e-3
+  complementary_mask: True
+  action_num_bins: 256
+  action_infer_steps: 6
+  action_conf_threshold: 0.90
+  action_infer_enabled: False
+
+dataset:
+  gen_type: "pre"
+  und_type: "captioning"
+  params:
+    batch_size: ${training.batch_size}
+    shuffle_buffer_size: 1000
+    num_workers: 8
+    resolution: 512
+    pin_memory: True
+    persistent_workers: True
+
+  preprocessing:
+    max_seq_length: 576
+    resolution: 512
+    center_crop: False
+    random_flip: False
+
+training:
+  clip_pad_tokens: False
+  gradient_accumulation_steps: 1
+  cond_dropout_prob: 0.0
+  batch_size: 1

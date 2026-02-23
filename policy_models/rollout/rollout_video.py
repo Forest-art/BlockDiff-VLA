@@ -5,12 +5,19 @@ from typing import List, Set
 
 from PIL import Image
 import numpy as np
-from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
+from pytorch_lightning.loggers import TensorBoardLogger
+try:
+    from pytorch_lightning.loggers import WandbLogger
+except Exception:
+    class WandbLogger:  # type: ignore
+        pass
 import torch
 import torch.distributed as dist
 from torchvision.transforms.functional import resize
-import wandb
-import wandb.util
+try:
+    import wandb
+except Exception:
+    wandb = None
 from moviepy.editor import ImageSequenceClip
 
 from policy_models.utils.utils import add_text
@@ -128,7 +135,7 @@ class RolloutVideo:
         In case of logging with WandB, save the videos as GIF in tmp directory,
         then log them at the end of the validation epoch from rank 0 process.
         """
-        if isinstance(self.logger, WandbLogger) and not self.log_to_file:
+        if isinstance(self.logger, WandbLogger) and wandb is not None and not self.log_to_file:
             for video, tag in zip(self.videos, self.tags):
                 video = np.clip(video.numpy() * 255, 0, 255).astype(np.uint8)
                 wandb_vid = wandb.Video(video, fps=10, format="gif")
@@ -154,7 +161,7 @@ class RolloutVideo:
         """
         if self.log_to_file:
             self._log_videos_to_file(global_step)
-        elif isinstance(self.logger, WandbLogger):
+        elif isinstance(self.logger, WandbLogger) and wandb is not None:
             self._log_videos_to_wandb()
         elif isinstance(self.logger, TensorBoardLogger):
             self._log_videos_to_tb(global_step)
@@ -195,6 +202,8 @@ class RolloutVideo:
         self.logger.experiment.add_video(f"video{tag}", video, global_step=global_step, fps=10)
 
     def _log_videos_to_wandb(self):
+        if wandb is None:
+            raise RuntimeError("WandB logger selected but wandb is not installed.")
         if dist.is_available() and dist.is_initialized():
             all_video_paths = [None for _ in range(torch.distributed.get_world_size())]
             all_captions = [None for _ in range(torch.distributed.get_world_size())]
@@ -236,10 +245,6 @@ class RolloutVideo:
                 video = video.unsqueeze(0)
             video = np.clip(video.numpy() * 255, 0, 255).astype(np.uint8)
 
-            mpy = wandb.util.get_module(
-                "moviepy.editor",
-                required='wandb.Video requires moviepy and imageio when passing raw data.  Install with "pip install moviepy imageio"',
-            )
             tensor = self._prepare_video(video)
             # Resize tensor if resolution scale is not 1.0
             if self.resolution_scale != 1.0:
@@ -248,9 +253,9 @@ class RolloutVideo:
             
             if save_as_video:
             # encode sequence of images into gif string
-                clip = mpy.ImageSequenceClip(list(tensor), fps=30)
+                clip = ImageSequenceClip(list(tensor), fps=30)
             else:
-                clip = mpy.ImageSequenceClip(list(tensor), fps=20)
+                clip = ImageSequenceClip(list(tensor), fps=20)
 
             tag = tag.replace("/", "_")
             if save_as_video:
@@ -273,10 +278,6 @@ class RolloutVideo:
             video = video.unsqueeze(0)
         video = np.clip(video.numpy() * 255, 0, 255).astype(np.uint8)
 
-        mpy = wandb.util.get_module(
-            "moviepy.editor",
-            required='wandb.Video requires moviepy and imageio when passing raw data.  Install with "pip install moviepy imageio"',
-        )
         tensor = self._prepare_video(video)
         # Resize tensor if resolution scale is not 1.0
         if self.resolution_scale != 1.0:
@@ -285,9 +286,9 @@ class RolloutVideo:
 
         if save_as_video:
             # encode sequence of images into gif string
-            clip = mpy.ImageSequenceClip(list(tensor), fps=30)
+            clip = ImageSequenceClip(list(tensor), fps=30)
         else:
-            clip = mpy.ImageSequenceClip(list(tensor), fps=20)
+            clip = ImageSequenceClip(list(tensor), fps=20)
 
         tag = tag.replace("/", "_")
         if save_as_video:

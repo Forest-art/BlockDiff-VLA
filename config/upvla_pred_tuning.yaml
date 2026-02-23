@@ -4,9 +4,10 @@ wandb:
   resume: 'auto'
 
 experiment:
-    project: "Robot-Project"
-    name: "UP-VLA-action-10"
-    output_dir: "UP-VLA-action-10"
+    project: "BlockDiff-VLA"
+    tracker: "tensorboard"
+    name: "BlockDiff-VLA-action-10"
+    output_dir: "BlockDiff-VLA-action-10"
     save_every: 10000
     eval_every: 2500
     generate_every: 5000
@@ -17,6 +18,7 @@ experiment:
 act_step: 10
 
 model:
+    framework: "upvla"
     vq_model:
         type: "magvitv2"
         vq_model_name: "showlab/magvitv2"
@@ -75,6 +77,7 @@ lr_scheduler:
         warmup_steps: 1000
 
 training:
+    text_objective: "ar"
     clip_pad_tokens: False
     gradient_accumulation_steps: 4
     batch_size_pre: 4
@@ -93,6 +96,8 @@ training:
     pre_coeff: 1.0
     act_coeff: 0.0 
     mmu_coeff: 0.1
+    text_coeff: 0.0
+    action_bd_coeff: 0.0
 eval: False
 mmu_image_root: "./validation_samples"
 question: 'Please describe this image in detail. *** Describe things you see in the image and point out their positions in this image.'

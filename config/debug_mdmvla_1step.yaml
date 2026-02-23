@@ -1,0 +1,116 @@
+wandb:
+  entity: null
+  resume: 'never'
+
+experiment:
+  project: "BlockDiff-VLA-debug"
+  tracker: "tensorboard"
+  name: "debug-mdmvla-1step"
+  output_dir: "outputs/debug-mdmvla-1step"
+  save_every: 1
+  eval_every: 100000
+  generate_every: 100000
+  log_every: 1
+  log_grad_norm_every: 100000
+  resume_from_checkpoint: false
+
+act_step: 10
+
+model:
+  framework: "mdmvla"
+  vq_model:
+    type: "magvitv2"
+    vq_model_name: "/home/xlubl/upvla_assets/magvitv2"
+
+  showo:
+    load_from_showo: True
+    pretrained_model_path: "/home/xlubl/upvla_assets/show-o-w-clip-vit-512x512"
+    w_clip_vit: True
+    vocab_size: 58498
+    llm_vocab_size: 50295
+    llm_model_path: "/home/xlubl/upvla_assets/phi-1_5"
+    codebook_size: 8192
+    num_vq_tokens: 1024
+    num_new_special_tokens: 10
+
+  vla:
+    num_view: 1
+
+  gradient_checkpointing: True
+
+block_diffusion:
+  text_enabled: False
+  action_enabled: False
+  block_size: 32
+  mask_eps: 1.0e-3
+  complementary_mask: True
+  action_num_bins: 256
+
+text_mdm:
+  min_mask_ratio: 0.15
+  max_mask_ratio: 0.60
+
+dataset:
+  gen_type: "future_view_prediction_w_action"
+  und_type: "llava_tuning"
+  combined_loader_mode: "min_size"
+  params:
+    train_pre_shards_path_or_url: "/project/peilab/luxiaocheng/projects/BlockDiff-VLA/debug_data/calvin_debug_processed_training"
+    train_mmu_shards_path_or_url: "/project/peilab/luxiaocheng/projects/BlockDiff-VLA/dummy_data/llava_tuning_665k_data"
+    add_caption_prompt: True
+    validation_prompts_file: "./validation_samples/predict_prompts.txt"
+    shuffle_buffer_size: 16
+    num_workers: 0
+    resolution: 512
+    pin_memory: False
+    persistent_workers: False
+
+  preprocessing:
+    max_seq_length: 576
+    resolution: 512
+    center_crop: False
+    random_flip: False
+
+optimizer:
+  name: adamw
+  params:
+    learning_rate: 0.0001
+    scale_lr: False
+    beta1: 0.9
+    beta2: 0.999
+    weight_decay: 0.01
+    epsilon: 1e-8
+
+lr_scheduler:
+  scheduler: "cosine"
+  params:
+    learning_rate: ${optimizer.params.learning_rate}
+    warmup_steps: 1
+
+training:
+  text_objective: "mdm"
+  clip_pad_tokens: False
+  gradient_accumulation_steps: 1
+  batch_size_pre: 1
+  batch_size_mmu: 1
+  mixed_precision: "no"
+  enable_tf32: False
+  seed: 10086
+  max_train_steps: 1
+  overfit_one_batch: False
+  cond_dropout_prob: 0.0
+  min_masking_rate: 0.0
+  label_smoothing: 0.0
+  max_grad_norm: null
+  guidance_scale: 0.0
+  generation_timesteps: 1
+  pre_coeff: 1.0
+  act_coeff: 1.0
+  mmu_coeff: 0.0
+  text_coeff: 1.0
+  action_bd_coeff: 0.0
+
+eval: False
+mmu_image_root: "./validation_samples"
+question: "Please describe this image in detail."
+max_new_tokens: 32

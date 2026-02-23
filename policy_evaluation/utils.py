@@ -8,13 +8,20 @@ import cv2
 import hydra
 import numpy as np
 from omegaconf import OmegaConf
-import pyhash
 import torch
 from hydra.core.global_hydra import GlobalHydra
 
 from policy_models.utils.utils import add_text, format_sftp_path
 
-hasher = pyhash.fnv1_32()
+try:
+    import pyhash
+    hasher = pyhash.fnv1_32()
+except Exception:
+    # Fallback when pyhash is unavailable in lightweight environments.
+    import hashlib
+
+    def hasher(s: str) -> int:
+        return int(hashlib.md5(s.encode("utf-8")).hexdigest()[:8], 16)
 logger = logging.getLogger(__name__)
 
 
@@ -192,10 +199,10 @@ def get_default_beso_and_env(train_folder=None, dataset_path=None, checkpoint=No
     dataloader = data_module.val_dataloader()
     #dataset = dataloader.dataset.datasets["lang"]
     dataset = dataloader["lang"].dataset
-    if device_id != 'cpu':
+    if str(device_id).lower() != "cpu":
         device = torch.device(f"cuda:{device_id}")
     else:
-        device = 'cpu'
+        device = torch.device("cpu")
 
     if lang_embeddings is None:
         lang_embeddings = LangEmbeddings(dataset.abs_datasets_dir, lang_folder, device=device)
@@ -227,9 +234,29 @@ def join_vis_lang(img, lang_text):
 
 class LangEmbeddings:
     def __init__(self, val_dataset_path, lang_folder, device=torch.device("cuda:0")):
-        embeddings = np.load(Path(val_dataset_path) / lang_folder / "embeddings.npy", allow_pickle=True).item()
-        # we want to get the embedding for full sentence, not just a task name
-        self.lang_embeddings = {v["ann"][0]: v["emb"] for k, v in embeddings.items()}
+        lang_dir = Path(val_dataset_path) / lang_folder
+        embeddings_path = lang_dir / "embeddings.npy"
+        auto_lang_ann_path = lang_dir / "auto_lang_ann.npy"
+        if embeddings_path.exists():
+            embeddings = np.load(embeddings_path, allow_pickle=True).item()
+            # We want to get the embedding for full sentence, not just a task name.
+            self.lang_embeddings = {v["ann"][0]: v["emb"] for _, v in embeddings.items()}
+        elif auto_lang_ann_path.exists():
+            logger.warning(
+                "embeddings.npy not found at %s, falling back to auto_lang_ann.npy.",
+                embeddings_path,
+            )
+            lang_data = np.load(auto_lang_ann_path, allow_pickle=True).item()
+            anns = lang_data["language"]["ann"]
+            embs = lang_data["language"]["emb"]
+            self.lang_embeddings = {}
+            for ann, emb in zip(anns, embs):
+                ann_text = ann[0] if isinstance(ann, (list, tuple, np.ndarray)) else ann
+                self.lang_embeddings[str(ann_text)] = emb
+        else:
+            raise FileNotFoundError(
+                f"Neither embeddings.npy nor auto_lang_ann.npy found under {lang_dir}"
+            )
         self.device = device
 
     def get_lang_goal(self, task):

@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=blockdiff_quick_ar
+#SBATCH --partition=preempt
+#SBATCH --account=peilab
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=01:00:00
+#SBATCH --output=/project/peilab/luxiaocheng/projects/BlockDiff-VLA/logs/blockdiff_quick_ar_%j.out
+#SBATCH --error=/project/peilab/luxiaocheng/projects/BlockDiff-VLA/logs/blockdiff_quick_ar_%j.err
+
+set -euo pipefail
+
+REPO=/project/peilab/luxiaocheng/projects/BlockDiff-VLA
+VENV=${VENV:-/home/xlubl/.venv_blockdiff_pip}
+TRAIN_STEPS=${TRAIN_STEPS:-3}
+DATASET_ROOT=${DATASET_ROOT:-/project/peilab/luxiaocheng/projects/calvin/dataset/calvin_debug_dataset}
+RUN_ROOT=${RUN_ROOT:-/home/xlubl/blockdiff_quick_ar_${SLURM_JOB_ID}}
+TAG=quick_arvla
+OUT_DIR="$RUN_ROOT/outputs/$TAG"
+MODEL_CFG="$RUN_ROOT/policy_rollout/${TAG}_model.yaml"
+EVAL_JSON="$RUN_ROOT/results/${TAG}_offline_eval.json"
+
+mkdir -p "$RUN_ROOT" "$RUN_ROOT/outputs" "$RUN_ROOT/logs" "$RUN_ROOT/results" "$RUN_ROOT/policy_rollout"
+
+source "$VENV/bin/activate"
+export PYTHONPATH="$REPO"
+export TOKENIZERS_PARALLELISM=false
+
+if [[ ! -f "$REPO/debug_data/calvin_debug_processed_training/dataset_info.json" ]]; then
+  python "$REPO/scripts/prepare_calvin_debug_processed.py" \
+    --source-split-dir "$DATASET_ROOT/training" \
+    --output-dir "$REPO/debug_data/calvin_debug_processed_training" \
+    --instruction "debug instruction" \
+    --max-frames 256 \
+    --start-index 0
+fi
+
+python "$REPO/train_upvla.py" \
+  "config=$REPO/config/debug_arvla_1step.yaml" \
+  "experiment.tracker=tensorboard" \
+  "training.max_train_steps=$TRAIN_STEPS" \
+  "experiment.output_dir=$OUT_DIR" \
+  "experiment.name=$TAG" \
+  "dataset.params.train_pre_shards_path_or_url=$REPO/debug_data/calvin_debug_processed_training" \
+  "dataset.params.train_mmu_shards_path_or_url=$REPO/dummy_data/llava_tuning_665k_data"
+
+CKPT_DIR="$(ls -d "$OUT_DIR"/checkpoint-* 2>/dev/null | sort -V | tail -n 1)"
+if [[ -z "${CKPT_DIR:-}" ]]; then
+  echo "[ERROR] no checkpoint found under $OUT_DIR"
+  exit 1
+fi
+
+python - <<PY
+from omegaconf import OmegaConf
+cfg = OmegaConf.load("$REPO/policy_rollout/debug_arvla_model.yaml")
+cfg.model.showo.tuned_model_path = "$CKPT_DIR"
+OmegaConf.save(cfg, "$MODEL_CFG")
+print("wrote", "$MODEL_CFG")
+PY
+
+python "$REPO/scripts/eval_upvla_offline_actions.py" \
+  --dataset-root "$DATASET_ROOT" \
+  --split validation \
+  --model-config "$MODEL_CFG" \
+  --device cuda:0 \
+  --start-only \
+  --max-samples 1 \
+  --clip-action \
+  --output-json "$EVAL_JSON"
+
+python "$REPO/scripts/summarize_offline_eval_json.py" --inputs "$EVAL_JSON" | tee "$RUN_ROOT/results/summary.md"
+
+echo "RUN_ROOT=$RUN_ROOT"
+echo "DONE"
