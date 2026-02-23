@@ -76,7 +76,7 @@ lr_scheduler:
 
 training:
     clip_pad_tokens: False
-    gradient_accumulation_steps: 4
+    gradient_accumulation_steps: 1
     batch_size_pre: 4
     batch_size_mmu: 4
     mixed_precision: "bf16"

@@ -24,12 +24,11 @@ import math
 import shutil
 import time
 from pathlib import Path
-from typing import Union, Tuple
+from typing import List, Optional, Union, Tuple
 
 import numpy as np
 from PIL import Image
 from omegaconf import OmegaConf
-import wandb
 import torch
 from torch.optim import AdamW
 from lightning.pytorch.utilities import CombinedLoader
@@ -68,6 +67,35 @@ except ImportError:
 logger = get_logger(__name__, log_level="INFO")
 
 
+def _log_images(
+    accelerator: Accelerator,
+    key: str,
+    pil_images: List[Image.Image],
+    step: int,
+    captions: Optional[List[str]] = None,
+):
+    if not accelerator.is_main_process or len(pil_images) == 0:
+        return
+    if len(accelerator.trackers) == 0:
+        return
+    tb_tracker = accelerator.get_tracker("tensorboard")
+    writer = getattr(tb_tracker, "writer", None)
+    if writer is None:
+        return
+    for idx, image in enumerate(pil_images):
+        writer.add_image(f"{key}/{idx}", np.asarray(image), global_step=step, dataformats="HWC")
+        if captions is not None and idx < len(captions):
+            writer.add_text(f"{key}/{idx}_caption", captions[idx], global_step=step)
+
+
+def _log_scalars(accelerator: Accelerator, values: dict, step: int):
+    if not accelerator.is_main_process:
+        return
+    if len(accelerator.trackers) == 0:
+        return
+    accelerator.log(values, step=step)
+
+
 def get_vq_model_class(model_type):
     if model_type == "magvitv2":
         return MAGVITv2
@@ -91,7 +119,7 @@ def main():
     accelerator = Accelerator(
         gradient_accumulation_steps=config.training.gradient_accumulation_steps,
         mixed_precision=config.training.mixed_precision,
-        log_with="wandb",
+        log_with="tensorboard",
         project_dir=config.experiment.logging_dir,
         split_batches=True,
     )
@@ -122,28 +150,9 @@ def main():
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
-        resume_wandb_run = config.wandb.resume
-        run_id = config.wandb.get("run_id", None)
-        if run_id is None:
-            resume_wandb_run = False
-            run_id = wandb.util.generate_id()
-            config.wandb.run_id = run_id
-
-        wandb_init_kwargs = dict(
-            name=config.experiment.name,
-            id=run_id,
-            resume=resume_wandb_run,
-            entity=config.wandb.get("entity", None),
-            config_exclude_keys=[],
-        )
-        wandb_config = {k: v for k, v in flatten_omega_conf(config, resolve=True)}
-        wandb_config.pop("experiment.resume_from_checkpoint")
-
-        accelerator.init_trackers(
-            config.experiment.project,
-            config=wandb_config,
-            init_kwargs={"wandb": wandb_init_kwargs},
-        )
+        tracker_config = {k: v for k, v in flatten_omega_conf(config, resolve=True)}
+        tracker_config.pop("experiment.resume_from_checkpoint", None)
+        accelerator.init_trackers(config.experiment.project, config=tracker_config)
 
     if accelerator.is_main_process:
         os.makedirs(config.experiment.output_dir, exist_ok=True)
@@ -587,6 +596,7 @@ def main():
                     )
 
                     visualize_predictions(
+                        accelerator=accelerator,
                         model=model,
                         vq_model=vq_model,
                         uni_prompting=uni_prompting,
@@ -680,6 +690,7 @@ def main():
                     )
 
                     visualize_predictions(
+                        accelerator=accelerator,
                         model=model,
                         vq_model=vq_model,
                         uni_prompting=uni_prompting,
@@ -738,6 +749,7 @@ def main():
 
 @torch.no_grad()
 def visualize_predictions(
+    accelerator,
     model,
     vq_model,
     uni_prompting,
@@ -801,17 +813,20 @@ def visualize_predictions(
         predicted_images_ = np.concatenate((images, groundtruth_images, recons_images, predicted_images_), 2)
         pil_images = [Image.fromarray(image) for image in predicted_images_]
 
-        # Log images
-        wandb_images = [
-            wandb.Image(image, caption=f'mask ratio: {r:0.2f} (should be 0.0) \n caption: {texts[i]}')
-            for i, (image, r) in enumerate(zip(pil_images, mask_ratio))
+        image_captions = [
+            f"mask ratio: {r:0.2f} (should be 0.0)\ncaption: {texts[j]}"
+            for j, r in enumerate(mask_ratio)
         ]
-        wandb.log(
-            {
-                f"(view {i + 1}/{config.model.vla.num_view}): Input original images v.s. Future images v.s Ground truth (Recon) v.s. Predicted images":
-                    wandb_images
-            },
-            step=global_step)
+        _log_images(
+            accelerator=accelerator,
+            key=(
+                f"(view {i + 1}/{config.model.vla.num_view}): "
+                "Input original images v.s. Future images v.s Ground truth (Recon) v.s. Predicted images"
+            ),
+            pil_images=pil_images,
+            captions=image_captions,
+            step=global_step,
+        )
 
     model.train()
 
@@ -936,14 +951,13 @@ def generate_images(
         recons_images = recons_images.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
         target_images = np.concatenate([recons_images, gen_images], axis=2)
         pil_images = [Image.fromarray(image) for image in target_images]
-        # Log images
-        wandb_images = [wandb.Image(image, caption=validation_prompts[j]) for j, image in enumerate(pil_images)]
-        wandb.log(
-            {
-                f"(view {i + 1}/{config.model.vla.num_view}): Generated images (left input recon/right predict future)":
-                    wandb_images
-            },
-            step=global_step)
+        _log_images(
+            accelerator=accelerator,
+            key=f"(view {i + 1}/{config.model.vla.num_view}): Generated images (left input recon/right predict future)",
+            pil_images=pil_images,
+            captions=validation_prompts,
+            step=global_step,
+        )
     model.train()
 
 
@@ -1119,8 +1133,13 @@ def mmu_generate(
     images = images.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
     pil_images = [Image.fromarray(image) for image in images]
 
-    wandb_images = [wandb.Image(image, caption=responses[i]) for i, image in enumerate(pil_images)]
-    wandb.log({"multimodal understanding": wandb_images}, step=global_step)
+    _log_images(
+        accelerator=accelerator,
+        key="multimodal understanding",
+        pil_images=pil_images,
+        captions=responses,
+        step=global_step,
+    )
 
     model.train()
 
@@ -1262,8 +1281,14 @@ def evaluate_validation(
         counter += 1
         if counter >= max_step:
             break
-    wandb.log({"validation_loss_pre": loss_meter_pre.avg}, step=global_step)
-    wandb.log({"validation_loss_act": loss_meter_act.avg}, step=global_step)
+    _log_scalars(
+        accelerator=accelerator,
+        values={
+            "validation_loss_pre": loss_meter_pre.avg,
+            "validation_loss_act": loss_meter_act.avg,
+        },
+        step=global_step,
+    )
     logger.info(f"validation_loss_act: {loss_meter_act.avg:0.4f}"
                 f"validation_loss_pre: {loss_meter_pre.avg:0.4f}")
     model.train()
