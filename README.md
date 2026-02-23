@@ -13,12 +13,19 @@ All three keep the same image objective and continuous action regression path by
 
 
 ##  Installation 🛠️
-Default setup (minimal, no extra GitHub repositories required):
+Default setup (minimal, no extra GitHub repositories required, no `python -m venv` needed):
 
 ```bash
 git clone <your_repo_url>/BlockDiff-VLA.git
 cd BlockDiff-VLA
-python -m venv blockdiff_vla_env
+pip install --user -r requirements_minimal.txt \
+  omegaconf accelerate==0.21.0 tensorboard lightning hydra-core termcolor gym==0.26.2 sentencepiece
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+If you prefer virtualenv, you can still use:
+```bash
+python3 -m venv blockdiff_vla_env
 source blockdiff_vla_env/bin/activate
 pip install -r requirements_minimal.txt \
   omegaconf accelerate==0.21.0 tensorboard lightning hydra-core termcolor gym==0.26.2 sentencepiece
@@ -26,7 +33,7 @@ pip install -r requirements_minimal.txt \
 
 If you need full training stack instead of minimal stack:
 ```bash
-pip install -r requirements.txt
+pip install --user -r requirements.txt
 ```
 
 Default tracker backend is TensorBoard across provided configs. Launch dashboard with:
@@ -45,6 +52,10 @@ Quick 3-step debug training + offline eval (Slurm 1 GPU, still no `calvin_env` d
 ```bash
 sbatch scripts/quick_debug_ar_eval.sbatch
 TRAIN_STEPS=5 sbatch scripts/quick_debug_ar_eval.sbatch
+```
+If your cluster does not support venv activation in job scripts:
+```bash
+ENV_MODE=system TRAIN_STEPS=5 sbatch scripts/quick_debug_ar_eval.sbatch
 ```
 Outputs are saved under:
 `/home/xlubl/blockdiff_quick_ar_<jobid>/`
@@ -122,6 +133,10 @@ For HKUST SuperPOD users, an end-to-end Slurm smoke pipeline is provided:
 ```bash
 sbatch scripts/blockdiff_debug_pip_home.sbatch
 ```
+This script supports both env modes:
+- `ENV_MODE=system` (default): use current python + `pip` (`PIP_USER=1` by default)
+- `ENV_MODE=venv`: create and use `$VENV` via `python3 -m venv`
+
 This submits AR/MDM/BD 1-step training + offline eval in one job and writes a final summary table to:
 `/home/xlubl/blockdiff_debug_run_<jobid>/results/summary.md`
 

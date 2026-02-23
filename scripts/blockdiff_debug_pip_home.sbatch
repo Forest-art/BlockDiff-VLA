@@ -15,6 +15,8 @@ set -euo pipefail
 REPO=/project/peilab/luxiaocheng/projects/BlockDiff-VLA
 RUN_ROOT="${RUN_ROOT:-/home/xlubl/blockdiff_debug_run_${SLURM_JOB_ID}}"
 VENV="${VENV:-/home/xlubl/.venv_blockdiff_pip}"
+ENV_MODE="${ENV_MODE:-system}"  # system | venv
+PIP_USER="${PIP_USER:-1}"       # only used when ENV_MODE=system
 KEEP_CHECKPOINTS="${KEEP_CHECKPOINTS:-0}"
 DATASET_ROOT="${DATASET_ROOT:-/project/peilab/luxiaocheng/projects/calvin/dataset/calvin_debug_dataset}"
 TRAIN_SPLIT_DIR="${TRAIN_SPLIT_DIR:-$DATASET_ROOT/training}"
@@ -22,12 +24,23 @@ export RUN_ROOT
 
 mkdir -p "$RUN_ROOT" "$RUN_ROOT/logs" "$RUN_ROOT/outputs" "$RUN_ROOT/results" "$RUN_ROOT/policy_rollout" "$RUN_ROOT/debug_data"
 
-rm -rf "$VENV"
-python3 -m venv "$VENV"
-source "$VENV/bin/activate"
+if [[ "$ENV_MODE" == "venv" ]]; then
+  rm -rf "$VENV"
+  python3 -m venv "$VENV"
+  source "$VENV/bin/activate"
+  PIP_CMD=(python -m pip)
+  PIP_FLAGS=()
+else
+  PIP_CMD=(pip)
+  PIP_FLAGS=()
+  if [[ "$PIP_USER" == "1" ]]; then
+    PIP_FLAGS+=(--user)
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
+fi
 
-python -m pip install --upgrade pip
-python -m pip install -r "$REPO/requirements_minimal.txt" \
+"${PIP_CMD[@]}" install --upgrade pip "${PIP_FLAGS[@]}"
+"${PIP_CMD[@]}" install "${PIP_FLAGS[@]}" -r "$REPO/requirements_minimal.txt" \
   omegaconf accelerate==0.21.0 tensorboard lightning hydra-core termcolor gym==0.26.2 sentencepiece
 
 export PYTHONPATH="$REPO"

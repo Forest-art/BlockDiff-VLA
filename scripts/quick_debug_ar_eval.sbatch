@@ -14,6 +14,7 @@ set -euo pipefail
 
 REPO=/project/peilab/luxiaocheng/projects/BlockDiff-VLA
 VENV=${VENV:-/home/xlubl/.venv_blockdiff_pip}
+ENV_MODE=${ENV_MODE:-auto}  # auto | venv | system
 TRAIN_STEPS=${TRAIN_STEPS:-3}
 DATASET_ROOT=${DATASET_ROOT:-/project/peilab/luxiaocheng/projects/calvin/dataset/calvin_debug_dataset}
 RUN_ROOT=${RUN_ROOT:-/home/xlubl/blockdiff_quick_ar_${SLURM_JOB_ID}}
@@ -24,7 +25,18 @@ EVAL_JSON="$RUN_ROOT/results/${TAG}_offline_eval.json"
 
 mkdir -p "$RUN_ROOT" "$RUN_ROOT/outputs" "$RUN_ROOT/logs" "$RUN_ROOT/results" "$RUN_ROOT/policy_rollout"
 
-source "$VENV/bin/activate"
+if [[ "$ENV_MODE" == "venv" ]]; then
+  if [[ ! -f "$VENV/bin/activate" ]]; then
+    echo "[ERROR] ENV_MODE=venv but missing $VENV/bin/activate"
+    exit 1
+  fi
+  source "$VENV/bin/activate"
+elif [[ "$ENV_MODE" == "auto" && -f "$VENV/bin/activate" ]]; then
+  source "$VENV/bin/activate"
+else
+  echo "[INFO] using current python env (ENV_MODE=$ENV_MODE)"
+fi
+
 export PYTHONPATH="$REPO"
 export TOKENIZERS_PARALLELISM=false
 
