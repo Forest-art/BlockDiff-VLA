@@ -366,14 +366,38 @@ pip install -e /path/to/calvin/calvin_env
 - `validation/`
 - `validation/.hydra/merged_config.yaml`
 
-Lastly, execute the following command:
+Copy-ready online rollout command (AR-VLA / UP-VLA baseline):
 ```bash
-PYTHONPATH=$(pwd) python policy_rollout/calvin_evaluate_upvla.py \
-  dataset_path=/path/to/calvin/task_ABC_D \
-  model_config=$(pwd)/policy_rollout/arvla_model.yaml \
-  device=0
+cd /path/to/BlockDiff-VLA
+source ./venv_rollout/bin/activate
+export PYTHONPATH=$(pwd)
+
+# 1) Fill these three paths first
+export CALVIN_DATA_ROOT=/path/to/calvin/task_ABC_D
+export MODEL_YAML=$(pwd)/policy_rollout/arvla_model.yaml
+export CKPT_DIR=/path/to/your/checkpoint-20000
+
+# 2) Inject checkpoint path into rollout model config
+python - <<'PY'
+import os
+from omegaconf import OmegaConf
+cfg = OmegaConf.load(os.environ["MODEL_YAML"])
+cfg.model.showo.tuned_model_path = os.environ["CKPT_DIR"]
+OmegaConf.save(cfg, os.environ["MODEL_YAML"])
+print("updated", os.environ["MODEL_YAML"])
+PY
+
+# 3) Launch online rollout
+python -m policy_rollout.calvin_evaluate_upvla \
+  dataset_path=$CALVIN_DATA_ROOT \
+  root_data_dir=$CALVIN_DATA_ROOT \
+  model_config=$MODEL_YAML \
+  device=0 \
+  num_sequences=100 \
+  num_videos=0 \
+  log_wandb=False
 ```
-For MDM/BD rollout, switch `model_config` to `$(pwd)/policy_rollout/mdmvla_model.yaml` or `$(pwd)/policy_rollout/bdvla_model.yaml`.
+For MDM/BD rollout, switch `MODEL_YAML` to `$(pwd)/policy_rollout/mdmvla_model.yaml` or `$(pwd)/policy_rollout/bdvla_model.yaml`.
 After running this command, you can find the predicted images in the folder of `tuned_model_path` which visualize both the current observations and future predictions.
 
 ### 📊 Rollout in your own embodiments
