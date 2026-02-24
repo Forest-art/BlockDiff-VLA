@@ -56,14 +56,14 @@ def get_video_tag(i):
 
 def get_log_dir(log_dir):
     if log_dir is not None:
-        log_dir = Path(log_dir)
-        os.makedirs(log_dir, exist_ok=True)
+        root_dir = Path(log_dir)
     else:
-        log_dir = Path(__file__).parents[3] / "evaluation"
-        if not log_dir.exists():
-            log_dir = Path("/tmp/evaluation")
+        root_dir = Path(__file__).parents[3] / "evaluation" / "logs"
+        if not root_dir.exists():
+            root_dir = Path("/tmp/evaluation") / "logs"
 
-    log_dir = log_dir / "logs" / time.strftime("%Y-%m-%d_%H-%M-%S")
+    os.makedirs(root_dir, exist_ok=True)
+    log_dir = root_dir / time.strftime("%Y-%m-%d_%H-%M-%S")
     os.makedirs(log_dir, exist_ok=False)
     print(f"logging to {log_dir}")
     return log_dir
@@ -77,6 +77,40 @@ def count_success(results):
         sr = n_success / len(results)
         step_success.append(sr)
     return step_success
+
+
+def save_rollout_summary(checkpoint, results, log_dir):
+    avg_seq_len = float(np.mean(results)) if len(results) > 0 else 0.0
+    chain_sr = {i + 1: sr for i, sr in enumerate(count_success(results))} if len(results) > 0 else {}
+    payload = {
+        "checkpoint": checkpoint,
+        "num_sequences": len(results),
+        "avg_seq_len": avg_seq_len,
+        "chain_sr": chain_sr,
+        "results": results,
+    }
+    out_file = log_dir / "results.json"
+    with open(out_file, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"saved rollout summary to {out_file}")
+
+
+def resolve_state_dict_path(tuned_model_path):
+    tuned_path = Path(tuned_model_path).expanduser()
+    if tuned_path.is_file():
+        if tuned_path.suffix in {".bin", ".safetensors"}:
+            return tuned_path
+        raise ValueError(f"Unsupported checkpoint file format: {tuned_path}")
+
+    candidates = [
+        tuned_path / "unwrapped_model" / "pytorch_model.bin",
+        tuned_path / "pytorch_model.bin",
+        tuned_path / "model.safetensors",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def print_and_save(total_results, plan_dicts, cfg, log_dir=None):
@@ -173,7 +207,7 @@ def evaluate_policy(model, env, lang_embeddings, cfg, num_videos=0, save_dir=Non
             description = " ".join([f"{i + 1}/5 : {v * 100:.1f}% |" for i, v in enumerate(success_rates)])
             description += f" Average: {average_rate:.1f} |"
             eval_sequences.set_description(description)
-        if result < 4 and record:
+        if record:
             rollout_video._log_currentvideos_to_file(i, save_as_video=True)
 
     # if num_videos > 0:
@@ -365,15 +399,19 @@ def main(cfg):
     )
 
     device = torch.device(f"cuda:{cfg.device}")
-    checkpoint = model_config.model.showo.tuned_model_path
-    model = get_upvla_agent(model_config, cfg)
+    model, checkpoint = get_upvla_agent(model_config, cfg)
+    original_cwd = Path(hydra.utils.get_original_cwd())
+    log_root = Path(cfg.log_dir).expanduser()
+    if not log_root.is_absolute():
+        log_root = original_cwd / log_root
+    log_dir = get_log_dir(log_root)
     if log_wandb:
-        log_dir = get_log_dir(model_config.model.showo.tuned_model_path + "/calvin_evaluation")
         os.makedirs(log_dir / "wandb", exist_ok=False)
-        results[checkpoint], plans[checkpoint] = evaluate_policy(
-            model, env, lang_embeddings, cfg, num_videos=cfg.num_videos, save_dir=Path(log_dir))
-        # print_and_save(results, plans, cfg, log_dir=log_dir)
-        # run.finish()
+    results[checkpoint], plans[checkpoint] = evaluate_policy(
+        model, env, lang_embeddings, cfg, num_videos=cfg.num_videos, save_dir=Path(log_dir))
+    save_rollout_summary(checkpoint, results[checkpoint], Path(log_dir))
+    # print_and_save(results, plans, cfg, log_dir=log_dir)
+    # run.finish()
 
 
 def get_upvla_agent(model_config, cfg):
@@ -404,18 +442,50 @@ def get_upvla_agent(model_config, cfg):
     vq_model.requires_grad_(False)
     vq_model.eval()
 
-    model = Upvla.from_pretrained(
-        config.model.showo.pretrained_model_path, low_cpu_mem_usage=False, act_step=config.act_step).to(device)
-    assert config.model.showo.vocab_size == model.vocab_size
-    # load from tuned ckpt
-    path = f"{config.model.showo.tuned_model_path}/unwrapped_model/pytorch_model.bin"
-    print(f"Resuming from checkpoint {path}")
-    state_dict = torch.load(path, map_location="cpu")
-    model.load_state_dict(state_dict, strict=True)
-    del state_dict
+    tuned_model_path = str(getattr(config.model.showo, "tuned_model_path", "") or "").strip()
+    model = None
+    loaded_from = config.model.showo.pretrained_model_path
+    if tuned_model_path:
+        tuned_dir = Path(tuned_model_path).expanduser()
+        if tuned_dir.is_dir() and (tuned_dir / "config.json").exists():
+            try:
+                model = Upvla.from_pretrained(
+                    tuned_model_path, low_cpu_mem_usage=False, act_step=config.act_step
+                ).to(device)
+                loaded_from = tuned_model_path
+                print(f"Loaded model directly from tuned checkpoint directory: {loaded_from}")
+            except Exception as exc:
+                print(f"Direct tuned from_pretrained failed ({exc}), fallback to base + state_dict load.")
+
+    if model is None:
+        model = Upvla.from_pretrained(
+            config.model.showo.pretrained_model_path, low_cpu_mem_usage=False, act_step=config.act_step
+        ).to(device)
+        assert config.model.showo.vocab_size == model.vocab_size
+
+        if tuned_model_path:
+            state_dict_path = resolve_state_dict_path(tuned_model_path)
+            if state_dict_path is None:
+                raise FileNotFoundError(
+                    f"Could not find tuned checkpoint under: {tuned_model_path}. "
+                    "Expected one of: unwrapped_model/pytorch_model.bin, pytorch_model.bin, model.safetensors"
+                )
+            print(f"Resuming from checkpoint {state_dict_path}")
+            if state_dict_path.suffix == ".safetensors":
+                from safetensors.torch import load_file as load_safetensors
+
+                state_dict = load_safetensors(str(state_dict_path), device="cpu")
+            else:
+                state_dict = torch.load(str(state_dict_path), map_location="cpu")
+            model.load_state_dict(state_dict, strict=True)
+            del state_dict
+            loaded_from = str(state_dict_path)
+        else:
+            print("No tuned_model_path provided, using pretrained_model_path only.")
+
     model.eval()
     mask_token_id = model.config.mask_token_id
-    return (model_config, model, uni_prompting, vq_model, mask_token_id)
+    return (model_config, model, uni_prompting, vq_model, mask_token_id), loaded_from
 
 
 if __name__ == "__main__":
