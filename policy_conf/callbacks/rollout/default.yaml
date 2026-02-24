@@ -4,6 +4,7 @@ _target_: policy_models.rollout.rollout.Rollout
 _recursive_: false
 env_cfg:
   _target_: policy_models.wrappers.hulc_wrapper.HulcWrapper
+  use_egl: false
 skip_epochs: 10
 rollout_freq: 5
 video: false
