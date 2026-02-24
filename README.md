@@ -376,6 +376,8 @@ export PYTHONPATH=$(pwd)
 export CALVIN_DATA_ROOT=/path/to/calvin/task_ABC_D
 export MODEL_YAML=$(pwd)/policy_rollout/arvla_model.yaml
 export CKPT_DIR=/path/to/your/checkpoint-20000
+# if EGL auto-detection is unstable on your cluster, pin it manually
+export EGL_VISIBLE_DEVICES=0
 
 # 2) Inject checkpoint path into rollout model config
 python - <<'PY'

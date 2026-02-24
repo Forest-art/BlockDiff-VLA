@@ -30,15 +30,20 @@ class HulcWrapper(gym.Wrapper):
     @staticmethod
     def set_egl_device(device):
         if "EGL_VISIBLE_DEVICES" in os.environ:
-            logger.warning("Environment variable EGL_VISIBLE_DEVICES is already set. Is this intended?")
+            logger.warning(
+                "Environment variable EGL_VISIBLE_DEVICES is already set. "
+                "Skipping EGL auto-detection and using the provided value."
+            )
+            return
         cuda_id = device.index if device.type == "cuda" else 0
         try:
             egl_id = get_egl_device_id(cuda_id)
-        except EglDeviceNotFoundError:
+        except (EglDeviceNotFoundError, IndexError, FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
             logger.warning(
-                "Couldn't find correct EGL device. Setting EGL_VISIBLE_DEVICE=0. "
+                "Couldn't determine EGL device (%s). Setting EGL_VISIBLE_DEVICES=0. "
                 "When using DDP with many GPUs this can lead to OOM errors. "
                 "Did you install PyBullet correctly? Please refer to calvin env README"
+                % repr(exc)
             )
             egl_id = 0
         os.environ["EGL_VISIBLE_DEVICES"] = str(egl_id)
