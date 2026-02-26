@@ -21,7 +21,7 @@ model:
         w_clip_vit: True
         vocab_size: 58498
         llm_vocab_size: 50295
-        llm_model_path: './showlab/phi-1_5'
+        llm_model_path: 'showlab/phi-1_5'
         codebook_size: 8192
         num_vq_tokens: 1024
         num_new_special_tokens: 10

@@ -372,35 +372,52 @@ cd /path/to/BlockDiff-VLA
 source ./venv_rollout/bin/activate
 export PYTHONPATH=$(pwd)
 
-# 1) Fill these three paths first
+# 1) Fill required paths
 export CALVIN_DATA_ROOT=/path/to/calvin/task_ABC_D
 export MODEL_YAML=$(pwd)/policy_rollout/arvla_model.yaml
 export CKPT_DIR=/path/to/your/checkpoint-20000
+export ROLLOUT_MODEL_YAML=$(pwd)/rollout_outputs/rollout_model_$(date +%Y%m%d_%H%M%S).yaml
 # if EGL auto-detection is unstable on your cluster, pin it manually
 export EGL_VISIBLE_DEVICES=0
 
-# 2) Inject checkpoint path into rollout model config
+# 2) Create a temporary rollout config (do not overwrite source yaml)
 python - <<'PY'
 import os
+from pathlib import Path
 from omegaconf import OmegaConf
 cfg = OmegaConf.load(os.environ["MODEL_YAML"])
 cfg.model.showo.tuned_model_path = os.environ["CKPT_DIR"]
-OmegaConf.save(cfg, os.environ["MODEL_YAML"])
-print("updated", os.environ["MODEL_YAML"])
+Path(os.environ["ROLLOUT_MODEL_YAML"]).parent.mkdir(parents=True, exist_ok=True)
+OmegaConf.save(cfg, os.environ["ROLLOUT_MODEL_YAML"])
+print("updated", os.environ["ROLLOUT_MODEL_YAML"])
 PY
 
 # 3) Launch online rollout
 python -m policy_rollout.calvin_evaluate_upvla \
   dataset_path=$CALVIN_DATA_ROOT \
   root_data_dir=$CALVIN_DATA_ROOT \
-  model_config=$MODEL_YAML \
+  model_config=$ROLLOUT_MODEL_YAML \
   device=0 \
   num_sequences=100 \
   num_videos=0 \
+  save_rollout_as_video=False \
   log_wandb=False
 ```
 For MDM/BD rollout, switch `MODEL_YAML` to `$(pwd)/policy_rollout/mdmvla_model.yaml` or `$(pwd)/policy_rollout/bdvla_model.yaml`.
-After running this command, you can find the predicted images in the folder of `tuned_model_path` which visualize both the current observations and future predictions.
+Outputs are saved under `log_dir` (default `./rollout_outputs/<timestamp>/`) including `results.json`, rollout videos (`.gif` by default, `.mp4` if `save_rollout_as_video=True`), and `input_predict_truth/*.png`.
+
+Distributed rollout (multi-node/multi-GPU via Slurm + `srun`):
+```bash
+cd /project/peilab/luxiaocheng/projects/BlockDiff-VLA
+
+# Edit MODEL_CFG / DATASET_ROOT / NUM_SEQUENCES as needed
+sbatch scripts/rollout_distributed_calvin.sbatch
+```
+The script launches one process per GPU and the evaluator will:
+- initialize `torch.distributed` from `WORLD_SIZE/RANK/LOCAL_RANK` (or `SLURM_*`),
+- split `num_sequences` evenly across ranks,
+- gather results across all ranks,
+- save a single merged `results.json` on rank 0.
 
 ### 📊 Rollout in your own embodiments
 For your own data, you should first train the model with your own dataloader. For rollout, we provide a script `./policy_rollout/policy_upvla.py` as a reference, which can be directly used in Franka Emika Robotarm.

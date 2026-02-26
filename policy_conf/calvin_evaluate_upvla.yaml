@@ -16,11 +16,16 @@ eval_cfg_overwrite:
 ep_len: 360
 num_sequences: 1000
 num_videos: 10
+save_rollout_as_video: false # false => gif (cluster friendly), true => mp4 (ffmpeg/libx264 required)
 lang_embeddings: null
 render: False
 log_wandb: True
 wandb:
   entity: omeryagmurlu
+dist_backend: nccl
+dist_timeout_minutes: 60
+dist_master_port: 29500
+sequence_num_workers: null # null => use default from get_sequences
 debug: False
 dataset_path: /localssd/zjk_data/calvin/task_ABC_D # path to calvin
 model_name: mdt_test

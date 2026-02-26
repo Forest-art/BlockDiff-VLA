@@ -1,8 +1,11 @@
 from collections import Counter, defaultdict
+from datetime import timedelta
+from itertools import chain
 import json
 import logging
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 from PIL import Image
@@ -48,9 +51,126 @@ from policy_models.rollout.rollout_video import RolloutVideo
 logger = logging.getLogger(__name__)
 
 
+def is_dist_initialized():
+    return dist.is_available() and dist.is_initialized()
+
+
+def get_rank():
+    return dist.get_rank() if is_dist_initialized() else 0
+
+
+def get_world_size():
+    return dist.get_world_size() if is_dist_initialized() else 1
+
+
+def is_main_process():
+    return get_rank() == 0
+
+
+def _infer_slurm_master_addr():
+    node_list = os.environ.get("SLURM_NODELIST")
+    if not node_list:
+        return None
+    try:
+        out = subprocess.check_output(
+            ["scontrol", "show", "hostnames", node_list],
+            text=True,
+        ).strip()
+        if not out:
+            return None
+        return out.splitlines()[0]
+    except Exception:
+        return None
+
+
+def setup_distributed(cfg):
+    world_size = int(os.environ.get("WORLD_SIZE", os.environ.get("SLURM_NTASKS", "1")))
+    rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0")))
+    local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", "0")))
+
+    if world_size > 1:
+        os.environ.setdefault("WORLD_SIZE", str(world_size))
+        os.environ.setdefault("RANK", str(rank))
+        os.environ.setdefault("LOCAL_RANK", str(local_rank))
+        if "MASTER_ADDR" not in os.environ:
+            inferred_addr = _infer_slurm_master_addr()
+            if inferred_addr is not None:
+                os.environ["MASTER_ADDR"] = inferred_addr
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", str(getattr(cfg, "dist_master_port", 29500)))
+
+        if not is_dist_initialized():
+            backend = str(getattr(cfg, "dist_backend", "nccl"))
+            if backend == "nccl" and not torch.cuda.is_available():
+                backend = "gloo"
+            timeout_minutes = int(getattr(cfg, "dist_timeout_minutes", 60))
+            dist.init_process_group(
+                backend=backend,
+                init_method="env://",
+                timeout=timedelta(minutes=timeout_minutes),
+            )
+
+    if torch.cuda.is_available():
+        visible_devices = [d for d in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if d.strip() != ""]
+        if visible_devices:
+            num_visible = len(visible_devices)
+        else:
+            num_visible = torch.cuda.device_count()
+        if num_visible <= 0:
+            raise RuntimeError("CUDA is available but no visible CUDA devices were detected.")
+
+        if world_size > 1:
+            # With srun --gpus-per-task=1 each process often sees exactly one visible GPU.
+            device_id = local_rank % num_visible
+        else:
+            requested = int(cfg.device)
+            device_id = requested if requested < num_visible else 0
+        torch.cuda.set_device(device_id)
+        os.environ.setdefault("EGL_VISIBLE_DEVICES", str(device_id))
+    else:
+        device_id = int(cfg.device)
+
+    return {
+        "world_size": world_size,
+        "rank": rank,
+        "local_rank": local_rank,
+        "device_id": device_id,
+    }
+
+
+def cleanup_distributed():
+    if is_dist_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
+
+
+def divide_across_ranks(elements):
+    ws = get_world_size()
+    rank = get_rank()
+    return elements // ws + (1 if (elements % ws) > rank else 0)
+
+
+def split_sequences_for_rank(sequences):
+    ws = get_world_size()
+    rank = get_rank()
+    total = len(sequences)
+    base = total // ws
+    remainder = total % ws
+    start = rank * base + min(rank, remainder)
+    size = base + (1 if rank < remainder else 0)
+    end = start + size
+    return sequences[start:end], start
+
+
+def gather_results(local_results):
+    if not is_dist_initialized():
+        return local_results
+    gathered = [None for _ in range(get_world_size())]
+    dist.all_gather_object(gathered, local_results)
+    return list(chain.from_iterable(gathered))
+
+
 def get_video_tag(i):
-    if dist.is_available() and dist.is_initialized():
-        i = i * dist.get_world_size() + dist.get_rank()
     return f"_long_horizon/sequence_{i}"
 
 
@@ -113,6 +233,42 @@ def resolve_state_dict_path(tuned_model_path):
     return None
 
 
+def resolve_from_config_dir(config_path, maybe_path):
+    if maybe_path is None:
+        return maybe_path
+    raw_path = str(maybe_path).strip()
+    if not raw_path:
+        return raw_path
+    path_obj = Path(raw_path).expanduser()
+    if path_obj.is_absolute():
+        return str(path_obj)
+    return str((config_path.parent / path_obj).resolve())
+
+
+def resolve_model_paths(model_config, model_config_path):
+    model_config.model.vq_model.vq_model_name = resolve_from_config_dir(
+        model_config_path, model_config.model.vq_model.vq_model_name
+    )
+    for key in ("llm_model_path", "pretrained_model_path", "tuned_model_path"):
+        if key in model_config.model.showo:
+            model_config.model.showo[key] = resolve_from_config_dir(model_config_path, model_config.model.showo[key])
+    return model_config
+
+
+def log_rollout_video_with_fallback(rollout_video, index, save_as_video):
+    try:
+        rollout_video._log_currentvideos_to_file(index, save_as_video=save_as_video)
+    except Exception as exc:
+        if not save_as_video:
+            raise
+        logger.warning(
+            "Failed to save rollout %s as mp4 (%s). Falling back to gif.",
+            index,
+            exc,
+        )
+        rollout_video._log_currentvideos_to_file(index, save_as_video=False)
+
+
 def print_and_save(total_results, plan_dicts, cfg, log_dir=None):
     if log_dir is None:
         log_dir = get_log_dir(cfg.train_folder)
@@ -170,7 +326,7 @@ def print_and_save(total_results, plan_dicts, cfg, log_dir=None):
     print(f"Best model: epoch {max(ranking, key=ranking.get)} with average sequences length of {max(ranking.values())}")
 
 
-def evaluate_policy(model, env, lang_embeddings, cfg, num_videos=0, save_dir=None):
+def evaluate_policy(model, env, lang_embeddings, cfg, num_videos=0, save_dir=None, eval_sequences=None, sequence_offset=0):
     task_oracle = hydra.utils.instantiate(cfg.tasks)
     val_annotations = cfg.annotations
 
@@ -186,29 +342,34 @@ def evaluate_policy(model, env, lang_embeddings, cfg, num_videos=0, save_dir=Non
     else:
         rollout_video = None
 
-    eval_sequences = get_sequences(cfg.num_sequences)
+    if eval_sequences is None:
+        eval_sequences = get_sequences(cfg.num_sequences)
 
     results = []
     plans = defaultdict(list)
+    save_as_video = bool(getattr(cfg, "save_rollout_as_video", False))
 
-    if not cfg.debug:
-        eval_sequences = tqdm(eval_sequences, position=0, leave=True)
+    iterator = eval_sequences
+    use_tqdm = not cfg.debug and is_main_process()
+    if use_tqdm:
+        iterator = tqdm(eval_sequences, position=0, leave=True)
 
-    for i, (initial_state, eval_sequence) in enumerate(eval_sequences):
-        record = i < num_videos
+    for local_idx, (initial_state, eval_sequence) in enumerate(iterator):
+        global_idx = sequence_offset + local_idx
+        record = local_idx < num_videos
         result = evaluate_sequence(env, model, task_oracle, initial_state, eval_sequence, lang_embeddings,
-                                   val_annotations, cfg, record, rollout_video, i)
+                                   val_annotations, cfg, record, rollout_video, global_idx)
         results.append(result)
         if record:
             rollout_video.write_to_tmp()
-        if not cfg.debug:
+        if use_tqdm:
             success_rates = count_success(results)
             average_rate = sum(success_rates) / len(success_rates) * 5
             description = " ".join([f"{i + 1}/5 : {v * 100:.1f}% |" for i, v in enumerate(success_rates)])
             description += f" Average: {average_rate:.1f} |"
-            eval_sequences.set_description(description)
+            iterator.set_description(description)
         if record:
-            rollout_video._log_currentvideos_to_file(i, save_as_video=True)
+            log_rollout_video_with_fallback(rollout_video, global_idx, save_as_video=save_as_video)
 
     # if num_videos > 0:
     #    print('save_video_2:',rollout_video.save_dir)
@@ -235,7 +396,7 @@ def evaluate_sequence(env, model, task_checker, initial_state, eval_sequence, la
         if record:
             rollout_video.new_subtask()
         success = rollout(env, model, task_checker, cfg, subtask, lang_embeddings, val_annotations, record,
-                          rollout_video)
+                          rollout_video, sequence_idx=i)
         if record:
             rollout_video.draw_outcome(success)
         if success:
@@ -245,7 +406,18 @@ def evaluate_sequence(env, model, task_checker, initial_state, eval_sequence, la
     return success_counter
 
 
-def rollout(env, model, task_oracle, cfg, subtask, lang_embeddings, val_annotations, record=False, rollout_video=None):
+def rollout(
+    env,
+    model,
+    task_oracle,
+    cfg,
+    subtask,
+    lang_embeddings,
+    val_annotations,
+    record=False,
+    rollout_video=None,
+    sequence_idx=0,
+):
     if cfg.debug:
         print(f"{subtask} ", end="")
         time.sleep(0.5)
@@ -348,7 +520,11 @@ def rollout(env, model, task_oracle, cfg, subtask, lang_embeddings, val_annotati
                 images_to_save = np.concatenate(images_to_save, axis=1)
                 pil_images = Image.fromarray(images_to_save.squeeze())
                 os.makedirs(f"{str(rollout_video.save_dir)}/input_predict_truth", exist_ok=True)
-                save_path = f"{str(rollout_video.save_dir)}/input_predict_truth/{instruction}_step_{step:03}.png"
+                safe_instruction = instruction.replace("/", "_")
+                save_path = (
+                    f"{str(rollout_video.save_dir)}/input_predict_truth/"
+                    f"{safe_instruction}_seq_{sequence_idx:04d}_rank_{get_rank()}_step_{step:03}.png"
+                )
                 pil_images.save(save_path)
 
             images_to_save_now = images_to_save_new
@@ -378,47 +554,90 @@ def rollout(env, model, task_oracle, cfg, subtask, lang_embeddings, val_annotati
 @hydra.main(config_path="../policy_conf", config_name="calvin_evaluate_upvla")
 def main(cfg):
     log_wandb = cfg.log_wandb
-    torch.cuda.set_device(cfg.device)
-    seed_everything(0, workers=True)  # type:ignore
+    runtime = setup_distributed(cfg)
+    seed_everything(int(getattr(cfg, "seed", 0)) + runtime["rank"], workers=True)  # type:ignore
     # evaluate a custom model
     # checkpoints = [get_last_checkpoint(Path(cfg.train_folder))]
     from omegaconf import OmegaConf
-    model_config = OmegaConf.load(cfg.model_config)
+    original_cwd = Path(hydra.utils.get_original_cwd())
+    model_config_path = Path(cfg.model_config).expanduser()
+    if not model_config_path.is_absolute():
+        model_config_path = (original_cwd / model_config_path).resolve()
+    model_config = OmegaConf.load(model_config_path)
+    model_config = resolve_model_paths(model_config, model_config_path)
     # print(model_config.experiment)
     lang_embeddings = None
     env = None
     results = {}
     plans = {}
-    print(cfg.device)
+    if is_main_process():
+        print(f"rank/world_size: {runtime['rank']}/{runtime['world_size']}")
+        print(f"device_id(local cuda idx): {runtime['device_id']}")
     env, _, lang_embeddings = get_default_beso_and_env(
         dataset_path=cfg.dataset_path,
         env=env,
         lang_embeddings=lang_embeddings,
-        device_id=cfg.device,
+        device_id=runtime["device_id"],
         cfg=cfg,
     )
 
-    device = torch.device(f"cuda:{cfg.device}")
-    model, checkpoint = get_upvla_agent(model_config, cfg)
-    original_cwd = Path(hydra.utils.get_original_cwd())
+    model, checkpoint = get_upvla_agent(model_config, runtime["device_id"])
     log_root = Path(cfg.log_dir).expanduser()
     if not log_root.is_absolute():
         log_root = original_cwd / log_root
-    log_dir = get_log_dir(log_root)
-    if log_wandb:
-        os.makedirs(log_dir / "wandb", exist_ok=False)
-    results[checkpoint], plans[checkpoint] = evaluate_policy(
-        model, env, lang_embeddings, cfg, num_videos=cfg.num_videos, save_dir=Path(log_dir))
-    save_rollout_summary(checkpoint, results[checkpoint], Path(log_dir))
+    if is_dist_initialized():
+        log_dir_payload = [None]
+        if is_main_process():
+            log_dir_payload[0] = str(get_log_dir(log_root))
+            if log_wandb:
+                os.makedirs(Path(log_dir_payload[0]) / "wandb", exist_ok=False)
+        dist.broadcast_object_list(log_dir_payload, src=0)
+        log_dir = Path(log_dir_payload[0])
+    else:
+        log_dir = get_log_dir(log_root)
+        if log_wandb:
+            os.makedirs(log_dir / "wandb", exist_ok=False)
+
+    all_sequences = None
+    if is_dist_initialized():
+        seq_payload = [None]
+        if is_main_process():
+            seq_workers = getattr(cfg, "sequence_num_workers", None)
+            seq_payload[0] = get_sequences(cfg.num_sequences, num_workers=seq_workers)
+        dist.broadcast_object_list(seq_payload, src=0)
+        all_sequences = seq_payload[0]
+        eval_sequences, sequence_offset = split_sequences_for_rank(all_sequences)
+        local_num_videos = divide_across_ranks(int(cfg.num_videos))
+    else:
+        eval_sequences = get_sequences(cfg.num_sequences, num_workers=getattr(cfg, "sequence_num_workers", None))
+        sequence_offset = 0
+        local_num_videos = int(cfg.num_videos)
+
+    local_results, local_plans = evaluate_policy(
+        model,
+        env,
+        lang_embeddings,
+        cfg,
+        num_videos=local_num_videos,
+        save_dir=Path(log_dir),
+        eval_sequences=eval_sequences,
+        sequence_offset=sequence_offset,
+    )
+    results[checkpoint] = gather_results(local_results)
+    plans[checkpoint] = local_plans
+
+    if is_main_process():
+        save_rollout_summary(checkpoint, results[checkpoint], Path(log_dir))
+    cleanup_distributed()
     # print_and_save(results, plans, cfg, log_dir=log_dir)
     # run.finish()
 
 
-def get_upvla_agent(model_config, cfg):
+def get_upvla_agent(model_config, device_id):
     #########################
     # showo_vla prepare  #
     #########################
-    device = torch.device(f"cuda:{cfg.device}")
+    device = torch.device(f"cuda:{device_id}")
     config = model_config
     tokenizer = AutoTokenizer.from_pretrained(config.model.showo.llm_model_path, padding_side="left")
 
@@ -489,9 +708,6 @@ def get_upvla_agent(model_config, cfg):
 
 
 if __name__ == "__main__":
-    os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
-    # Set CUDA device IDs
-    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    # os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     main()
