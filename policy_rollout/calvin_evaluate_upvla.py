@@ -83,6 +83,29 @@ def _infer_slurm_master_addr():
         return None
 
 
+def _configure_egl_visible_device(cuda_device_id):
+    # Respect user-provided setting, but normalize to a single index for pybullet EGL plugin.
+    if "EGL_VISIBLE_DEVICES" in os.environ:
+        raw = os.environ.get("EGL_VISIBLE_DEVICES", "").strip()
+        egl_idx = raw.split(",")[0].strip() if raw else "0"
+        if not egl_idx:
+            egl_idx = "0"
+        os.environ["EGL_VISIBLE_DEVICES"] = egl_idx
+        os.environ.setdefault("EGL_VISIBLE_DEVICE", egl_idx)
+        return int(egl_idx)
+
+    try:
+        from calvin_env.utils.utils import EglDeviceNotFoundError, get_egl_device_id
+
+        egl_id = get_egl_device_id(int(cuda_device_id))
+    except (EglDeviceNotFoundError, ImportError, IndexError, FileNotFoundError, OSError, RuntimeError, ValueError):
+        egl_id = 0
+
+    os.environ["EGL_VISIBLE_DEVICES"] = str(egl_id)
+    os.environ.setdefault("EGL_VISIBLE_DEVICE", str(egl_id))
+    return egl_id
+
+
 def setup_distributed(cfg):
     world_size = int(os.environ.get("WORLD_SIZE", os.environ.get("SLURM_NTASKS", "1")))
     rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0")))
@@ -126,7 +149,7 @@ def setup_distributed(cfg):
             requested = int(cfg.device)
             device_id = requested if requested < num_visible else 0
         torch.cuda.set_device(device_id)
-        os.environ.setdefault("EGL_VISIBLE_DEVICES", str(device_id))
+        _configure_egl_visible_device(device_id)
     else:
         device_id = int(cfg.device)
 
