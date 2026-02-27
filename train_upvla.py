@@ -650,7 +650,7 @@ def main():
                     logs = {
                         "step_loss_pre": avg_loss_pre.item(),
                         "step_loss_mmu": avg_loss_mmu.item(),
-                        "step_loss_act": avg_loss_act.item(),
+                        "step_loss_a": avg_loss_act.item(),
                         "lr": lr_scheduler.get_last_lr()[0],
                         # "avg_masking_rate": avg_masking_rate.item(),
                         "samples/sec/gpu": samples_per_second_per_gpu,
@@ -662,7 +662,7 @@ def main():
                     logger.info(f"Step: {global_step + 1} "
                                 f"Loss_pre: {avg_loss_pre.item():0.4f} "
                                 f"Loss_mmu: {avg_loss_mmu.item():0.4f} "
-                                f"Loss_act: {avg_loss_act.item():0.4f} "
+                                f"Loss_a: {avg_loss_act.item():0.4f} "
                                 f"Data (t): {data_time_m.val:0.4f}, {samples_per_second_per_gpu:0.2f}/s/gpu "
                                 f"Batch (t): {batch_time_m.val:0.4f} "
                                 f"LR: {lr_scheduler.get_last_lr()[0]:0.6f}")
@@ -1275,7 +1275,7 @@ def evaluate_validation(
             actions=actions,
             clip_pad_tokens=config.training.clip_pad_tokens)
         batch_iter.set_description(
-            f"# act_loss: {loss_act.item():.4f} pre_loss: {loss_pre.item():.4f} mmu_loss: {loss_mmu.item():.4f}")
+            f"# loss_a: {loss_act.item():.4f} pre_loss: {loss_pre.item():.4f} mmu_loss: {loss_mmu.item():.4f}")
         loss_meter_pre.update(loss_pre.item(), batch_size_pre)
         loss_meter_act.update(loss_act.item(), batch_size_pre)
         counter += 1
@@ -1285,11 +1285,11 @@ def evaluate_validation(
         accelerator=accelerator,
         values={
             "validation_loss_pre": loss_meter_pre.avg,
-            "validation_loss_act": loss_meter_act.avg,
+            "validation_loss_a": loss_meter_act.avg,
         },
         step=global_step,
     )
-    logger.info(f"validation_loss_act: {loss_meter_act.avg:0.4f}"
+    logger.info(f"validation_loss_a: {loss_meter_act.avg:0.4f}"
                 f"validation_loss_pre: {loss_meter_pre.avg:0.4f}")
     model.train()
 
