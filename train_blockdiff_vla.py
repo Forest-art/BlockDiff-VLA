@@ -716,13 +716,17 @@ def main():
                     mmu_text_valid_mask = torch.zeros_like(input_ids_mmu, dtype=torch.bool)
                     mmu_text_valid_mask[:, mmu_prefix_len:] = labels_mmu_raw != uni_prompting.ignore_id
 
-                images_feat = vision_tower(pixel_values_mmu).to(images_feat_dtype)
+                images_feat = vision_tower(pixel_values_mmu)
                 if hasattr(model, 'module'):
-                    images_embeddings = model.module.mm_projector(images_feat)
-                    text_embeddings = model.module.showo.model.embed_tokens(input_ids_mmu)
+                    mm_projector = model.module.mm_projector
+                    text_embed_tokens = model.module.showo.model.embed_tokens
                 else:
-                    images_embeddings = model.mm_projector(images_feat)
-                    text_embeddings = model.showo.model.embed_tokens(input_ids_mmu)
+                    mm_projector = model.mm_projector
+                    text_embed_tokens = model.showo.model.embed_tokens
+                # Keep projector input dtype aligned with projector weights for torchrun non-DeepSpeed training.
+                projector_dtype = next(mm_projector.parameters()).dtype
+                images_embeddings = mm_projector(images_feat.to(projector_dtype))
+                text_embeddings = text_embed_tokens(input_ids_mmu).to(images_embeddings.dtype)
                 split_idx = 1 + input_ids_system.shape[1] + 1  # <|mmu|> + system + <|soi|>
                 part1 = text_embeddings[:, :split_idx, :]
                 part2 = text_embeddings[:, split_idx:, :]
