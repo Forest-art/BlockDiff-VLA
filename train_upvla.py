@@ -374,25 +374,80 @@ def main():
     #     len(train_dataloader_pre) / config.training.gradient_accumulation_steps)
     # num_train_epochs = math.ceil(config.training.max_train_steps / num_update_steps_per_epoch)
 
-    if config.experiment.resume_from_checkpoint:
+    resume_cfg = config.experiment.resume_from_checkpoint
+    resume_cfg_str = resume_cfg.strip().lower() if isinstance(resume_cfg, str) else None
+    resume_requested = bool(resume_cfg) and resume_cfg_str not in {"", "false", "none", "null", "off", "0", "no"}
+    if resume_requested:
         eval_path = config.get("eval_path", None)
+        output_dir = Path(config.experiment.output_dir)
+        resume_path = None
+
         if config.eval and eval_path is not None:
-            path = eval_path
+            resume_path = Path(eval_path)
+        elif isinstance(resume_cfg, str) and resume_cfg_str not in {"latest", "auto", "true", "yes", "on"}:
+            maybe_path = Path(resume_cfg)
+            candidates = []
+            if maybe_path.is_absolute():
+                candidates.append(maybe_path)
+            else:
+                candidates.extend(
+                    [
+                        output_dir / resume_cfg,
+                        output_dir / f"checkpoint-{resume_cfg}",
+                    ]
+                )
+            for candidate in candidates:
+                if candidate.exists():
+                    resume_path = candidate
+                    break
         else:
-            dirs = os.listdir(config.experiment.output_dir)
-            dirs = [d for d in dirs if d.startswith("checkpoint")]
+            dirs = [d for d in os.listdir(output_dir) if d.startswith("checkpoint-")]
             dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
-            path = dirs[-1] if len(dirs) > 0 else None
-        if path is not None:
-            path = os.path.join(config.experiment.output_dir, path)
+            if len(dirs) > 0:
+                resume_path = output_dir / dirs[-1]
 
-            global_step = int(os.path.basename(path).split("-")[1])
-            first_epoch = global_step // num_update_steps_per_epoch
+        if resume_path is None:
+            raise FileNotFoundError(
+                f"Resume requested (experiment.resume_from_checkpoint={resume_cfg}) "
+                f"but no checkpoint found in {output_dir}."
+            )
 
-            accelerator.print(f"Resuming from checkpoint {path}/unwrapped_model/pytorch_model.bin")
-            state_dict = torch.load(f'{path}/unwrapped_model/pytorch_model.bin', map_location="cpu")
-            model.load_state_dict(state_dict, strict=False)
-            del state_dict
+        model_candidates = [
+            resume_path / "unwrapped_model" / "pytorch_model.bin",
+            resume_path / "pytorch_model.bin",
+            resume_path / "unwrapped_model" / "model.safetensors",
+            resume_path / "model.safetensors",
+        ]
+        model_path = next((p for p in model_candidates if p.exists()), None)
+        if model_path is None:
+            raise FileNotFoundError(f"Cannot find model weights under checkpoint path: {resume_path}")
+
+        if resume_path.name.startswith("checkpoint-"):
+            try:
+                global_step = int(resume_path.name.split("-")[1])
+            except Exception:
+                global_step = 0
+        else:
+            global_step = 0
+
+        metadata_path = resume_path / "metadata.json"
+        if metadata_path.exists():
+            try:
+                metadata = json.load(metadata_path.open("r"))
+                global_step = int(metadata.get("global_step", global_step))
+            except Exception:
+                pass
+
+        first_epoch = global_step // num_update_steps_per_epoch
+        accelerator.print(f"Resuming from checkpoint {model_path}")
+        if model_path.suffix == ".safetensors":
+            from safetensors.torch import load_file as safe_load_file
+
+            state_dict = safe_load_file(str(model_path), device="cpu")
+        else:
+            state_dict = torch.load(str(model_path), map_location="cpu")
+        model.load_state_dict(state_dict, strict=False)
+        del state_dict
 
     ##################################
     #       Prepare accelerator     #
