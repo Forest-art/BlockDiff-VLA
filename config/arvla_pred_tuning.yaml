@@ -95,8 +95,6 @@ training:
   pre_coeff: 1.0
   act_coeff: 0.0
   mmu_coeff: 0.1
-  text_coeff: 0.0
-  action_bd_coeff: 0.0
 
 eval: False
 mmu_image_root: "./validation_samples"

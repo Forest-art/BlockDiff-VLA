@@ -96,8 +96,6 @@ training:
     pre_coeff: 1.0
     act_coeff: 0.0
     mmu_coeff: 0.1
-    text_coeff: 0.0
-    action_bd_coeff: 0.0
 eval: False
 mmu_image_root: "./validation_samples"
 question: 'Please describe this image in detail. *** Describe things you see in the image and point out their positions in this image.'

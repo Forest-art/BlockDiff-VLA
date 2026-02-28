@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import sys
 
 # from numpy.distutils.system_info import accelerate_info
 
@@ -308,6 +309,12 @@ def main():
         set_seed(config.training.seed)
 
     framework = str(config.model.get("framework", "upvla")).lower()
+    entry_script = Path(sys.argv[0]).name
+    if framework == "mdmvla" and entry_script == "train_blockdiff_vla.py":
+        raise ValueError(
+            "MDMVLA training is isolated to train_mdm_vla.py. "
+            "Please launch: python train_mdm_vla.py ..."
+        )
     is_bdvla = framework == "bdvla"
     text_objective_defaults = {
         "arvla": "ar",
@@ -1040,12 +1047,16 @@ def main():
                 avg_loss_text_obj = accelerator.gather(loss_text_obj.repeat(config.training.batch_size_pre)).mean()
                 avg_loss_action_bd = accelerator.gather(loss_action_bd.repeat(config.training.batch_size_pre)).mean()
 
-                # loss = config.training.pre_coeff * loss_pre + config.training.mmu_coeff * loss_mmu
-                loss = config.training.pre_coeff * loss_pre + \
-                       config.training.act_coeff * loss_act + \
-                       config.training.mmu_coeff * loss_mmu + \
-                       config.training.get("text_coeff", 0.0) * loss_text_obj + \
-                       config.training.get("action_bd_coeff", 0.0) * loss_action_bd
+                # Keep the same 3-term skeleton as UPVLA/ARVLA:
+                #   total = pre + action + text
+                # while text objective itself is selected by training.text_objective.
+                loss_action_total = loss_act + loss_action_bd
+                avg_loss_a_total = accelerator.gather(loss_action_total.repeat(config.training.batch_size_pre)).mean()
+                loss = (
+                    config.training.pre_coeff * loss_pre
+                    + config.training.act_coeff * loss_action_total
+                    + config.training.mmu_coeff * loss_text_obj
+                )
                 # avg_masking_rate = accelerator.gather(mask_prob.repeat(config.training.batch_size_pre)).mean()
 
                 accelerator.backward(loss)
@@ -1135,6 +1146,7 @@ def main():
                         "step_loss_pre": avg_loss_pre.item(),
                         "step_loss_mmu": avg_loss_mmu.item(),
                         "step_loss_a": avg_loss_act.item(),
+                        "step_loss_a_total": avg_loss_a_total.item(),
                         "step_loss_text_bd": avg_loss_text_bd.item(),
                         "step_loss_text_mdm": avg_loss_text_mdm.item(),
                         "step_loss_text_obj": avg_loss_text_obj.item(),
@@ -1151,6 +1163,7 @@ def main():
                                 f"Loss_pre: {avg_loss_pre.item():0.4f} "
                                 f"Loss_mmu: {avg_loss_mmu.item():0.4f} "
                                 f"Loss_a: {avg_loss_act.item():0.4f} "
+                                f"Loss_a_total: {avg_loss_a_total.item():0.4f} "
                                 f"Loss_text_bd: {avg_loss_text_bd.item():0.4f} "
                                 f"Loss_text_mdm: {avg_loss_text_mdm.item():0.4f} "
                                 f"Loss_text_obj({text_objective}): {avg_loss_text_obj.item():0.4f} "

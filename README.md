@@ -195,28 +195,36 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   train_upvla.py config=./config/arvla_action_tuning.yaml
 ```
 
-(3) Action-stage training (MDM text baseline):
+(3) Stage-1 training (MDM text baseline):
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   --config_file ./accelerate_configs/4_gpus_deepspeed_zero2.yaml \
   --main_process_port=8888 \
-  train_upvla.py config=./config/mdmvla_action_tuning.yaml
+  train_mdm_vla.py config=./config/mdmvla_stage1_pred_tuning.yaml
 ```
 
-(4) Action-stage training (Block Diffusion text baseline):
+(4) Stage-2 training (MDM text baseline):
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   --config_file ./accelerate_configs/4_gpus_deepspeed_zero2.yaml \
   --main_process_port=8888 \
-  train_upvla.py config=./config/bdvla_action_tuning.yaml
+  train_mdm_vla.py config=./config/mdmvla_stage2_action_tuning.yaml
 ```
 
-(5) Action-stage training (Qwen3 + Elastic Block Diffusion text baseline):
+(5) Action-stage training (Block Diffusion text baseline):
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   --config_file ./accelerate_configs/4_gpus_deepspeed_zero2.yaml \
   --main_process_port=8888 \
-  train_upvla.py config=./config/bdvla_action_tuning_qwen3_elastic.yaml
+  train_blockdiff_vla.py config=./config/bdvla_action_tuning.yaml
+```
+
+(6) Action-stage training (Qwen3 + Elastic Block Diffusion text baseline):
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
+  --config_file ./accelerate_configs/4_gpus_deepspeed_zero2.yaml \
+  --main_process_port=8888 \
+  train_blockdiff_vla.py config=./config/bdvla_action_tuning_qwen3_elastic.yaml
 ```
 
 ### 🛸 DeepSpeed Launch for AR-UPVLA Baseline (copy-ready)
@@ -233,8 +241,6 @@ CUDA_VISIBLE_DEVICES=0 accelerate launch \
   "experiment.output_dir=$(pwd)/outputs/upvla_ar_ds" \
   "model.framework=upvla" \
   "training.text_objective=ar" \
-  "training.text_coeff=0.0" \
-  "training.action_bd_coeff=0.0" \
   "dataset.params.train_pre_shards_path_or_url=/path/to/calvin_processed_training" \
   "dataset.params.train_mmu_shards_path_or_url=/path/to/llava_tuning_665k_data" \
   "model.vq_model.vq_model_name=/path/to/magvitv2" \
@@ -255,8 +261,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   "experiment.output_dir=$(pwd)/outputs/upvla_ar_ds" \
   "model.framework=upvla" \
   "training.text_objective=ar" \
-  "training.text_coeff=0.0" \
-  "training.action_bd_coeff=0.0" \
   "dataset.params.train_pre_shards_path_or_url=/path/to/calvin_processed_training" \
   "dataset.params.train_mmu_shards_path_or_url=/path/to/llava_tuning_665k_data" \
   "model.vq_model.vq_model_name=/path/to/magvitv2" \
@@ -277,8 +281,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch \
   "experiment.output_dir=$(pwd)/outputs/upvla_ar_ds" \
   "model.framework=upvla" \
   "training.text_objective=ar" \
-  "training.text_coeff=0.0" \
-  "training.action_bd_coeff=0.0" \
   "dataset.params.train_pre_shards_path_or_url=/path/to/calvin_processed_training" \
   "dataset.params.train_mmu_shards_path_or_url=/path/to/llava_tuning_665k_data" \
   "model.vq_model.vq_model_name=/path/to/magvitv2" \
@@ -301,8 +303,9 @@ If you only want smoke training for a few steps, append:
 
 Text-objective switches:
 - `training.text_objective: "ar" | "mdm" | "bd"`
-- `training.text_coeff`: weight for selected text objective
-- `training.mmu_coeff`: optional extra AR/MMU loss weight
+- `training.mmu_coeff`: weight for selected text objective
+- `training.pre_coeff`: vision prediction loss weight
+- `training.act_coeff`: action loss weight
 
 `AR-VLA` is the default `UP-VLA` setting (`model.framework: "upvla"` + `training.text_objective: "ar"`).
 
