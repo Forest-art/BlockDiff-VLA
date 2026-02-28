@@ -14,3 +14,8 @@ policy_rollout/*_local.yaml
 # generated artifacts
 lmms_outputs/
 rollout_outputs/
+
+# local bulky assets (not required for core train/rollout)
+training/questions.json
+validation_samples/Snipaste_*.png
+validation_samples/2077689c627bb01259b3fba1f539597.png
