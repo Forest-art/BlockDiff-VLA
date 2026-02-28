@@ -10,3 +10,7 @@ debug_data/
 dummy_data/tiny_phi_config*/
 
 policy_rollout/*_local.yaml
+
+# generated artifacts
+lmms_outputs/
+rollout_outputs/
