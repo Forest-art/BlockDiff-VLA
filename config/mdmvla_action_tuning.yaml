@@ -5,8 +5,8 @@ wandb:
 experiment:
     project: "BlockDiff-VLA"
     tracker: "tensorboard"
-    name: "MDMVLA-action-10"
-    output_dir: "MDMVLA-action-10"
+    name: "MDMVL-action-10"
+    output_dir: "MDMVL-action-10"
     save_every: 10000
     eval_every: 2500
     generate_every: 5000

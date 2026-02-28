@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # coding=utf-8
 
+import os
 import sys
 
 
@@ -22,8 +23,8 @@ def _ensure_cli_value(key: str, expected: str):
         return
     if str(current).strip().lower() != str(expected).strip().lower():
         raise ValueError(
-            f"{key} must be '{expected}' for train_mdm_vla.py, got '{current}'. "
-            "Use train_blockdiff_vla.py for non-MDM objectives."
+            f"{key} must be '{expected}' for train_mdm entry, got '{current}'. "
+            "Use train_blockdiff entry for non-MDM objectives."
         )
 
 
@@ -34,8 +35,8 @@ def _ensure_cli_false(key: str):
         return
     if str(current).strip().lower() not in _FALSE_LIKE:
         raise ValueError(
-            f"{key} must be false for train_mdm_vla.py, got '{current}'. "
-            "Use train_blockdiff_vla.py when block diffusion is enabled."
+            f"{key} must be false for train_mdm entry, got '{current}'. "
+            "Use train_blockdiff entry when block diffusion is enabled."
         )
 
 
@@ -47,6 +48,8 @@ def _inject_mdm_constraints():
 
 def main():
     _inject_mdm_constraints()
+    os.environ.setdefault("TRAIN_VL_LOGGER_NAME", "train_mdm_vl")
+    os.environ.setdefault("TRAIN_VL_SANITIZE_VLA", "1")
     from train_blockdiff_vla import main as _main
 
     _main()

@@ -200,7 +200,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
 CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   --config_file ./accelerate_configs/4_gpus_deepspeed_zero2.yaml \
   --main_process_port=8888 \
-  train_mdm_vla.py config=./config/mdmvla_stage1_pred_tuning.yaml
+  train_mdm_vl.py config=./config/mdmvla_stage1_pred_tuning.yaml
 ```
 
 (4) Stage-2 training (MDM text baseline):
@@ -208,7 +208,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
 CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   --config_file ./accelerate_configs/4_gpus_deepspeed_zero2.yaml \
   --main_process_port=8888 \
-  train_mdm_vla.py config=./config/mdmvla_stage2_action_tuning.yaml
+  train_mdm_vl.py config=./config/mdmvla_stage2_action_tuning.yaml
 ```
 
 (5) Action-stage training (Block Diffusion text baseline):

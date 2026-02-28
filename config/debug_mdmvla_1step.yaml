@@ -5,8 +5,8 @@ wandb:
 experiment:
   project: "BlockDiff-VLA-debug"
   tracker: "tensorboard"
-  name: "debug-mdmvla-1step"
-  output_dir: "outputs/debug-mdmvla-1step"
+  name: "debug-mdmvl-1step"
+  output_dir: "outputs/debug-mdmvl-1step"
   save_every: 1
   eval_every: 100000
   generate_every: 100000

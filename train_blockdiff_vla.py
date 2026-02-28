@@ -81,6 +81,57 @@ except ImportError:
 logger = get_logger(__name__, log_level="INFO")
 
 
+def _replace_vla_with_vl(text):
+    if not isinstance(text, str):
+        return text
+    return text.replace("VLA", "VL").replace("vla", "vl")
+
+
+class _VlaToVlLogFilter(logging.Filter):
+    def filter(self, record):
+        record.name = _replace_vla_with_vl(record.name)
+        record.msg = _replace_vla_with_vl(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(_replace_vla_with_vl(arg) for arg in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {k: _replace_vla_with_vl(v) for k, v in record.args.items()}
+        return True
+
+
+def _resolve_train_logger_name(framework: str) -> str:
+    env_name = os.environ.get("TRAIN_VL_LOGGER_NAME")
+    if env_name:
+        return env_name
+    framework_to_name = {
+        "mdmvla": "train_mdm_vl",
+        "bdvla": "train_blockdiff_vl",
+        "arvla": "train_ar_vl",
+        "upvla": "train_up_vl",
+    }
+    return framework_to_name.get(framework, "train_vl")
+
+
+def _install_vla_log_sanitizer():
+    if os.environ.get("TRAIN_VL_SANITIZE_VLA", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return
+
+    def _attach_filter(target_logger):
+        if not isinstance(target_logger, logging.Logger):
+            return
+        has_filter = any(isinstance(f, _VlaToVlLogFilter) for f in target_logger.filters)
+        if not has_filter:
+            target_logger.addFilter(_VlaToVlLogFilter())
+        for handler in target_logger.handlers:
+            has_handler_filter = any(isinstance(f, _VlaToVlLogFilter) for f in handler.filters)
+            if not has_handler_filter:
+                handler.addFilter(_VlaToVlLogFilter())
+
+    root_logger = logging.getLogger()
+    _attach_filter(root_logger)
+    for existing_logger in logging.root.manager.loggerDict.values():
+        _attach_filter(existing_logger)
+
+
 def _get_active_tracker_name(accelerator: Accelerator) -> Optional[str]:
     if len(accelerator.trackers) == 0:
         return None
@@ -213,10 +264,12 @@ def _sample_block_sizes_for_batch(
 
 
 def main():
+    global logger
     #########################
     # SETUP Accelerator     #
     #########################
     config = get_config()
+    framework = str(config.model.get("framework", "upvla")).lower()
 
     # Enable TF32 on Ampere GPUs
     if config.training.enable_tf32:
@@ -260,6 +313,8 @@ def main():
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO,
     )
+    _install_vla_log_sanitizer()
+    logger = get_logger(_resolve_train_logger_name(framework), log_level="INFO")
     logger.info(accelerator.state, main_process_only=False)
     if accelerator.is_local_main_process:
         set_verbosity_info()
@@ -308,12 +363,11 @@ def main():
     if config.training.seed is not None:
         set_seed(config.training.seed)
 
-    framework = str(config.model.get("framework", "upvla")).lower()
     entry_script = Path(sys.argv[0]).name
     if framework == "mdmvla" and entry_script == "train_blockdiff_vla.py":
         raise ValueError(
-            "MDMVLA training is isolated to train_mdm_vla.py. "
-            "Please launch: python train_mdm_vla.py ..."
+            "MDM training is isolated to the MDM entry. "
+            "Please launch: python train_mdm_vl.py ..."
         )
     is_bdvla = framework == "bdvla"
     text_objective_defaults = {
