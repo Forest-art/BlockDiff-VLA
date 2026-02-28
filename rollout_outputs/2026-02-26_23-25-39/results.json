@@ -1,0 +1,18 @@
+{
+  "checkpoint": "/home/xlubl/upvla_assets/UP-VLA-action-10/checkpoint-170000/unwrapped_model/pytorch_model.bin",
+  "num_sequences": 4,
+  "avg_seq_len": 0.25,
+  "chain_sr": {
+    "1": 0.25,
+    "2": 0.0,
+    "3": 0.0,
+    "4": 0.0,
+    "5": 0.0
+  },
+  "results": [
+    1,
+    0,
+    0,
+    0
+  ]
+}

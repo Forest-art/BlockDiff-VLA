@@ -84,15 +84,15 @@ def _infer_slurm_master_addr():
 
 
 def _configure_egl_visible_device(cuda_device_id):
-    # Respect user-provided setting, but normalize to a single index for pybullet EGL plugin.
-    if "EGL_VISIBLE_DEVICES" in os.environ:
-        raw = os.environ.get("EGL_VISIBLE_DEVICES", "").strip()
-        egl_idx = raw.split(",")[0].strip() if raw else "0"
-        if not egl_idx:
-            egl_idx = "0"
-        os.environ["EGL_VISIBLE_DEVICES"] = egl_idx
-        os.environ.setdefault("EGL_VISIBLE_DEVICE", egl_idx)
-        return int(egl_idx)
+    # Do not trust inherited EGL env vars from scheduler wrappers; recompute per rank.
+    stale_egl = os.environ.pop("EGL_VISIBLE_DEVICES", None)
+    stale_egl_single = os.environ.pop("EGL_VISIBLE_DEVICE", None)
+    if stale_egl is not None or stale_egl_single is not None:
+        logger.warning(
+            "Overriding inherited EGL env vars: EGL_VISIBLE_DEVICES=%s, EGL_VISIBLE_DEVICE=%s",
+            stale_egl,
+            stale_egl_single,
+        )
 
     try:
         from calvin_env.utils.utils import EglDeviceNotFoundError, get_egl_device_id

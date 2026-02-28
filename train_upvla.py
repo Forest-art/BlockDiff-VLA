@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import re
 
 # from numpy.distutils.system_info import accelerate_info
 
@@ -67,6 +68,32 @@ except ImportError:
 logger = get_logger(__name__, log_level="INFO")
 
 
+def _sanitize_path_component(name: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    if not name:
+        return "untitled"
+    return name[:120]
+
+
+def _save_images_to_disk(
+    accelerator: Accelerator,
+    key: str,
+    pil_images: List[Image.Image],
+    step: int,
+    captions: Optional[List[str]] = None,
+):
+    if len(pil_images) == 0:
+        return
+    output_root = Path(accelerator.project_dir).parent
+    step_dir = output_root / "generated_samples" / f"step_{int(step):08d}" / _sanitize_path_component(key)
+    step_dir.mkdir(parents=True, exist_ok=True)
+    for idx, image in enumerate(pil_images):
+        image_path = step_dir / f"{idx:03d}.png"
+        image.save(image_path)
+        if captions is not None and idx < len(captions):
+            (step_dir / f"{idx:03d}.txt").write_text(captions[idx], encoding="utf-8")
+
+
 def _log_images(
     accelerator: Accelerator,
     key: str,
@@ -76,6 +103,17 @@ def _log_images(
 ):
     if not accelerator.is_main_process or len(pil_images) == 0:
         return
+    try:
+        _save_images_to_disk(
+            accelerator=accelerator,
+            key=key,
+            pil_images=pil_images,
+            step=step,
+            captions=captions,
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to save generated images to disk for key={key}: {exc}")
+
     if len(accelerator.trackers) == 0:
         return
     tb_tracker = accelerator.get_tracker("tensorboard")
@@ -577,9 +615,11 @@ def main():
                 lr_scheduler.step()
 
                 # log gradient norm before zeroing it
-                if (accelerator.sync_gradients and (global_step + 1) % config.experiment.log_grad_norm_every == 0 and
-                        accelerator.is_main_process):
-                    log_grad_norm(model, accelerator, global_step + 1)
+                if accelerator.sync_gradients and (global_step + 1) % config.experiment.log_grad_norm_every == 0:
+                    accelerator.wait_for_everyone()
+                    if accelerator.is_main_process:
+                        log_grad_norm(model, accelerator, global_step + 1)
+                    accelerator.wait_for_everyone()
 
                 optimizer.zero_grad(set_to_none=True)
                 # *-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*
@@ -677,59 +717,64 @@ def main():
 
                 # Save model checkpoint
                 if (global_step + 1) % config.experiment.save_every == 0:
+                    accelerator.wait_for_everyone()
                     save_checkpoint(model, config, accelerator, global_step + 1)
+                    accelerator.wait_for_everyone()
 
-                if (global_step + 1) % config.experiment.generate_every == 0 and accelerator.is_main_process:
-                    generate_images(
-                        model,
-                        vq_model,
-                        uni_prompting,
-                        accelerator,
-                        config,
-                        global_step + 1,
-                        mask_schedule=mask_schedule,
-                        input_image_tokens=image_tokens_ori,
-                        clip_processor=clip_processor,
-                        vision_tower=vision_tower,
-                    )
+                if (global_step + 1) % config.experiment.generate_every == 0:
+                    accelerator.wait_for_everyone()
+                    if accelerator.is_main_process:
+                        generate_images(
+                            model,
+                            vq_model,
+                            uni_prompting,
+                            accelerator,
+                            config,
+                            global_step + 1,
+                            mask_schedule=mask_schedule,
+                            input_image_tokens=image_tokens_ori,
+                            clip_processor=clip_processor,
+                            vision_tower=vision_tower,
+                        )
 
-                    visualize_predictions(
-                        accelerator=accelerator,
-                        model=model,
-                        vq_model=vq_model,
-                        uni_prompting=uni_prompting,
-                        config=config,
-                        global_step=global_step + 1,
-                        input_ids=input_ids,
-                        target_image_tokens=target_image_tokens,
-                        batch_images=pixel_values,
-                        texts=texts,
-                        logits=logits,
-                    )
+                        visualize_predictions(
+                            accelerator=accelerator,
+                            model=model,
+                            vq_model=vq_model,
+                            uni_prompting=uni_prompting,
+                            config=config,
+                            global_step=global_step + 1,
+                            input_ids=input_ids,
+                            target_image_tokens=target_image_tokens,
+                            batch_images=pixel_values,
+                            texts=texts,
+                            logits=logits,
+                        )
 
-                    mmu_generate(
-                        model,
-                        vq_model,
-                        uni_prompting,
-                        accelerator,
-                        config,
-                        global_step + 1,
-                        clip_processor=clip_processor,
-                        vision_tower=vision_tower,
-                        SYSTEM_PROMPT=SYSTEM_PROMPT,
-                        SYSTEM_PROMPT_LEN=SYSTEM_PROMPT_LEN,
-                    )
+                        mmu_generate(
+                            model,
+                            vq_model,
+                            uni_prompting,
+                            accelerator,
+                            config,
+                            global_step + 1,
+                            clip_processor=clip_processor,
+                            vision_tower=vision_tower,
+                            SYSTEM_PROMPT=SYSTEM_PROMPT,
+                            SYSTEM_PROMPT_LEN=SYSTEM_PROMPT_LEN,
+                        )
 
-                    evaluate_validation(
-                        model=model,
-                        vq_model=vq_model,
-                        uni_prompting=uni_prompting,
-                        accelerator=accelerator,
-                        config=config,
-                        global_step=global_step + 1,
-                        clip_processor=clip_processor,
-                        vision_tower=vision_tower,
-                    )
+                        evaluate_validation(
+                            model=model,
+                            vq_model=vq_model,
+                            uni_prompting=uni_prompting,
+                            accelerator=accelerator,
+                            config=config,
+                            global_step=global_step + 1,
+                            clip_processor=clip_processor,
+                            vision_tower=vision_tower,
+                        )
+                    accelerator.wait_for_everyone()
 
                 global_step += 1
 
@@ -742,11 +787,13 @@ def main():
 
     # Evaluate and save checkpoint at the end of training
     save_checkpoint(model, config, accelerator, global_step)
+    accelerator.wait_for_everyone()
 
     # Save the final trained checkpoint
     if accelerator.is_main_process:
         model = accelerator.unwrap_model(model)
         model.save_pretrained(config.experiment.output_dir, safe_serialization=False)
+    accelerator.wait_for_everyone()
 
     accelerator.end_training()
 
@@ -1005,11 +1052,21 @@ def save_checkpoint(model, config, accelerator, global_step):
 
 
 def log_grad_norm(model, accelerator, global_step):
-    for name, param in model.named_parameters():
+    total_grad_sq = 0.0
+    grad_param_count = 0
+    for param in model.parameters():
         if param.grad is not None:
-            grads = param.grad.detach().data
-            grad_norm = (grads.norm(p=2) / grads.numel()).item()
-            accelerator.log({"grad_norm/" + name: grad_norm}, step=global_step)
+            grad = param.grad.detach()
+            total_grad_sq += float(grad.float().pow(2).sum().item())
+            grad_param_count += 1
+    total_grad_norm = math.sqrt(total_grad_sq) if total_grad_sq > 0 else 0.0
+    accelerator.log(
+        {
+            "grad_norm/total_l2": total_grad_norm,
+            "grad_norm/num_params_with_grad": float(grad_param_count),
+        },
+        step=global_step,
+    )
 
 
 @torch.no_grad()

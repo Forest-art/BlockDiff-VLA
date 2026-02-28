@@ -265,28 +265,39 @@ class Upvla(ModelMixin, ConfigMixin):
             logits = self(idx, input_embeddings=input_embeddings, attention_mask=attention_mask, output_mode="mmu")
             # print(logits)
             L = attention_mask.shape[-1]
+            mask_dtype = attention_mask.dtype
             attention_mask = attention_mask.squeeze()
             attention_mask_a = torch.hstack([
                 attention_mask,  # L, L
-                torch.zeros((L, 1)).to(device) + torch.finfo(logits.dtype).min,
+                torch.zeros((L, 1), device=device, dtype=mask_dtype) + torch.finfo(mask_dtype).min,
             ])
             attention_mask_b = torch.vstack([
                 attention_mask_a,  # L, L+1
-                torch.hstack([attention_mask[-1, :], torch.tensor([0]).to(device)]).unsqueeze(0),
+                torch.hstack([
+                    attention_mask[-1, :],
+                    torch.tensor([0], device=device, dtype=mask_dtype),
+                ]).unsqueeze(0),
             ])
             # attention_mask = attention_mask_b # L+1, L+1 , from origin code but get bug
             attention_mask = attention_mask_b.unsqueeze(0).unsqueeze(0)  # 1,1, L+1, L+1, fix bug by upvla
 
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
+            # Pluck the logits at the final step and guard numerical stability.
+            safe_temperature = max(float(temperature), 1e-6)
+            logits = torch.nan_to_num(logits[:, -1, :], nan=0.0, posinf=1e4, neginf=-1e4) / safe_temperature
             # optionally crop the logits to only the top k options
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
             # apply softmax to convert logits to (normalized) probabilities
             probs = F.softmax(logits, dim=-1)
-            # sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=1)
+            probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+            probs_sum = probs.sum(dim=-1, keepdim=True)
+            invalid_probs = (~torch.isfinite(probs_sum)).any() or (probs_sum <= 0).any()
+            if invalid_probs:
+                idx_next = torch.argmax(logits, dim=-1, keepdim=True)
+            else:
+                probs = probs / probs_sum
+                idx_next = torch.multinomial(probs, num_samples=1)
             result.append(idx_next[0][0])
             # append sampled index to the running sequence and continue
             if self.config.w_clip_vit:
