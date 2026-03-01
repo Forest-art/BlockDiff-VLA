@@ -48,7 +48,7 @@ def _inject_mdm_constraints():
 
 def main():
     _inject_mdm_constraints()
-    os.environ.setdefault("TRAIN_VL_LOGGER_NAME", "train_mdm_vl")
+    os.environ.setdefault("TRAIN_VL_LOGGER_NAME", "train_mdm_vla")
     os.environ.setdefault("TRAIN_VL_SANITIZE_VLA", "1")
     from train_blockdiff_vla import main as _main
 

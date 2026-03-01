@@ -518,6 +518,7 @@ def main():
 
     for epoch in range(first_epoch, num_train_epochs):
         model.train()
+        accelerator.wait_for_everyone()
         if accelerator.is_main_process:
             mmu_generate(
                 model,
@@ -531,6 +532,7 @@ def main():
                 SYSTEM_PROMPT=SYSTEM_PROMPT,
                 SYSTEM_PROMPT_LEN=SYSTEM_PROMPT_LEN,
             )
+        accelerator.wait_for_everyone()
         for batch, batch_idx, dataloader_idx in combined_dataloader:
             # for loss calculation
 
@@ -680,57 +682,60 @@ def main():
                 # *-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*
                 # just eval a checkpoint
                 # *-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*
-                if config.eval and accelerator.is_main_process:
-                    generate_images(
-                        model,
-                        vq_model,
-                        uni_prompting,
-                        accelerator,
-                        config,
-                        global_step + 1,
-                        mask_schedule=mask_schedule,
-                        input_image_tokens=image_tokens_ori,
-                        clip_processor=clip_processor,
-                        vision_tower=vision_tower,
-                    )
+                if config.eval:
+                    accelerator.wait_for_everyone()
+                    if accelerator.is_main_process:
+                        generate_images(
+                            model,
+                            vq_model,
+                            uni_prompting,
+                            accelerator,
+                            config,
+                            global_step + 1,
+                            mask_schedule=mask_schedule,
+                            input_image_tokens=image_tokens_ori,
+                            clip_processor=clip_processor,
+                            vision_tower=vision_tower,
+                        )
 
-                    visualize_predictions(
-                        accelerator=accelerator,
-                        model=model,
-                        vq_model=vq_model,
-                        uni_prompting=uni_prompting,
-                        config=config,
-                        global_step=global_step + 1,
-                        input_ids=input_ids,
-                        target_image_tokens=target_image_tokens,
-                        batch_images=pixel_values,
-                        texts=texts,
-                        logits=logits,
-                    )
+                        visualize_predictions(
+                            accelerator=accelerator,
+                            model=model,
+                            vq_model=vq_model,
+                            uni_prompting=uni_prompting,
+                            config=config,
+                            global_step=global_step + 1,
+                            input_ids=input_ids,
+                            target_image_tokens=target_image_tokens,
+                            batch_images=pixel_values,
+                            texts=texts,
+                            logits=logits,
+                        )
 
-                    mmu_generate(
-                        model,
-                        vq_model,
-                        uni_prompting,
-                        accelerator,
-                        config,
-                        global_step + 1,
-                        clip_processor=clip_processor,
-                        vision_tower=vision_tower,
-                        SYSTEM_PROMPT=SYSTEM_PROMPT,
-                        SYSTEM_PROMPT_LEN=SYSTEM_PROMPT_LEN,
-                    )
+                        mmu_generate(
+                            model,
+                            vq_model,
+                            uni_prompting,
+                            accelerator,
+                            config,
+                            global_step + 1,
+                            clip_processor=clip_processor,
+                            vision_tower=vision_tower,
+                            SYSTEM_PROMPT=SYSTEM_PROMPT,
+                            SYSTEM_PROMPT_LEN=SYSTEM_PROMPT_LEN,
+                        )
 
-                    evaluate_validation(
-                        model=model,
-                        vq_model=vq_model,
-                        uni_prompting=uni_prompting,
-                        accelerator=accelerator,
-                        config=config,
-                        global_step=global_step + 1,
-                        clip_processor=clip_processor,
-                        vision_tower=vision_tower,
-                    )
+                        evaluate_validation(
+                            model=model,
+                            vq_model=vq_model,
+                            uni_prompting=uni_prompting,
+                            accelerator=accelerator,
+                            config=config,
+                            global_step=global_step + 1,
+                            clip_processor=clip_processor,
+                            vision_tower=vision_tower,
+                        )
+                    accelerator.wait_for_everyone()
                     raise NotImplementedError("Evaluation done")
                 # *-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*
                 # just eval a checkpoint
